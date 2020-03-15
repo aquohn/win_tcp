@@ -5,7 +5,20 @@
 #include <stdlib.h>
 #include <signal.h>
 
-int sockfd; // global socket file descriptor
+#define DEFAULT_BUFLEN 1024
+#define DEFAULT_PORT 33333
+
+// compile with -lws2_32 at the END of the command
+
+SOCKET sock = INVALID_SOCKET; // global socket file descriptor
+
+void int_handler(int dummy) {
+  printf("\nClosing socket.");
+  shutdown(sock, SD_SEND);
+  closesocket(sock);
+  WSACleanup();
+  exit(0);
+}
 
 int main(int argc, char** argv) {
   WSADATA wsa;
@@ -15,6 +28,10 @@ int main(int argc, char** argv) {
     printf("Failed to start winsock! Error code: %d\n", status);
     return 1;
   }
+  signal(SIGINT, int_handler);
 
+  
   return 0;
 }  
+
+
