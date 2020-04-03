@@ -7,7 +7,7 @@ project (win_tcp C)
 set( WIN_TCP_SRC src )
 set( EXECUTABLE_OUTPUT_PATH bin )
 
-if ( "${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" )
+if ( ${CMAKE_C_COMPILER_ID} STREQUAL "GNU" )
   message( STATUS "Setting flags for ${CMAKE_C_COMPILER_ID} compiler" )
   add_definitions( -Wall )
 endif()
