@@ -8,7 +8,7 @@
 
 #define ERRPRINT(MSG, CODE) printf(MSG " Error code: %d\n", CODE); exit(1);
 
-#define DEFAULT_BUFLEN 16
+#define DEFAULT_BUFLEN 1024
 #define DEFAULT_PORT 33333
 #define ADDR_BUFLEN 32
 #define BACKLOG 5
@@ -19,14 +19,18 @@
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
 SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
 
+void close_serv() {
+  printf("\nClosing sockets.\n");
+  shutdown(listen_sock, SD_BOTH);
+  shutdown(conn_sock, SD_BOTH);
+  closesocket(listen_sock);
+  closesocket(conn_sock);
+  WSACleanup();
+}
+
 BOOL WINAPI int_handler(DWORD sig_type) {
   if (sig_type == CTRL_C_EVENT || sig_type == CTRL_BREAK_EVENT) {
-    printf("\nClosing sockets.\n");
-    shutdown(listen_sock, SD_BOTH);
-    shutdown(conn_sock, SD_BOTH);
-    closesocket(listen_sock);
-    closesocket(conn_sock);
-    WSACleanup();
+    close_serv();
   }
   return FALSE;
 }
@@ -66,16 +70,18 @@ int main(int argc, char** argv) {
   if (listen(listen_sock, BACKLOG) < 0) {
     status = WSAGetLastError();
     ERRPRINT("Failed to start listening!", status);
-  }
+  } 
+
+  printf("Server listening on port %u!\n\n", DEFAULT_PORT);
 
   // Handle connections
   while (1) {
-    struct sockaddr_in client_addr;
-    conn_sock = accept(listen_sock, (struct sockaddr *) &client_addr, 
+    struct sockaddr_in cli_addr;
+    conn_sock = accept(listen_sock, (struct sockaddr *) &cli_addr, 
         &sin_size);
-    char client_addr_str[ADDR_BUFLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_addr_str, ADDR_BUFLEN);
-    printf("Connection from %s\n", client_addr_str);
+    char cli_addr_str[ADDR_BUFLEN];
+    inet_ntop(AF_INET, &cli_addr.sin_addr, cli_addr_str, ADDR_BUFLEN);
+    printf("Connection from %s\n", cli_addr_str);
 
     // read and print data
     int conn_status = SOCKET_ERROR;
@@ -85,17 +91,13 @@ int main(int argc, char** argv) {
       conn_status = recv(conn_sock, recvbuf, (int) recvbuflen, 0);
       if (conn_status == SOCKET_ERROR) {
         ERRPRINT("Error receiving data!", WSAGetLastError());
+      } else if (conn_status == 0) {
+        printf("Connection closed by client.\n");
       } else {
         printf("Received %d bytes.\n", conn_status);
-        if (conn_status == 0) {
-          printf("Connection closed by client.\n");
-        } else {
-          recvbuf[conn_status] = 0;
-        }
+        recvbuf[conn_status] = 0;
+        printf("%s\n", recvbuf);
       }
-
-      printf("%s\n", recvbuf);
-
     } while (conn_status != 0);
   }
 
