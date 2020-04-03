@@ -12,7 +12,11 @@
 #define DEFAULT_PORT 33333
 #define ADDR_BUFLEN 32
 #define SERV_IP_ADDR "127.0.0.1"
-#define USR "usr/"
+
+#define USR "usr\\"
+#define PATH_LEN 255
+#define FILE_LEN 6
+#define FILE_CNT 3
 
 // compile with -lws2_32 at the END of the command
 
@@ -24,7 +28,6 @@ void close_cli() {
     closesocket(sock);
     WSACleanup();
 }
-
 
 BOOL WINAPI int_handler(DWORD sig_type) {
   if (sig_type == CTRL_C_EVENT || sig_type == CTRL_BREAK_EVENT) {
@@ -67,10 +70,16 @@ int main(int argc, char** argv) {
   }
 
   // Send some text
-  char buf[DEFAULT_BUFLEN] = "Get served lmao";
-  if (send(sock, buf, strlen(buf), 0) < 0) {
-    status = WSAGetLastError();
-    ERRPRINT("Failed to send data!", status);
+  char buf[PATH_LEN] = USR;
+  char *bufptr = buf + strlen(USR);
+  char *filenames[FILE_CNT] = {"a.jpg", "b.mp3", "c.txt"};
+
+  for (int i = 0; i < FILE_CNT; ++i) {
+    strncpy(bufptr, filenames[i], FILE_LEN);
+    if (send(sock, buf, strlen(buf), 0) < 0) {
+      status = WSAGetLastError();
+      ERRPRINT("Failed to send data!", status);
+    }
   }
 
   close_cli();
