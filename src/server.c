@@ -9,25 +9,30 @@
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
 #define WT_QUIT(MSG, CODE) close_serv(); WT_DIE(MSG, CODE)
 
-#define DEFAULT_BUFLEN 1024
+#define DATA_BUFLEN 1024
 #define DEFAULT_PORT 33333
 #define ADDR_BUFLEN 32
+#define FIELD_BUFLEN 128
+#define FIELD_BUFLEN_STR "128"
 #define BACKLOG 5
 
 // some Windows macro I'm not using
 #ifdef DELETE
-  #undef DELETE
+#undef DELETE
 #endif
-#define HTTP_HDR_END "\r\n\r\n"
+#define HTTP_DELIM "\r\n"
+#define HTTP_END "\r\n\r\n"
 #define SRV "srv"
+#define FILE_CNT 3
 
 enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
-MTD_COUNT}; // for keeping track of number of methods
+  MTD_COUNT}; // for keeping track of number of methods
 char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
   "OPTIONS", "TRACE", "PATCH"};
 
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
+FILE *locate(char *url, char *accept);
 FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
     char **errmsg);
 
@@ -87,8 +92,8 @@ int main(int argc, char** argv) {
 
     // Read in data
     int conn_status = SOCKET_ERROR;
-    char recvbuf[DEFAULT_BUFLEN + 1];
-    size_t recvbuflen = DEFAULT_BUFLEN;
+    char recvbuf[DATA_BUFLEN + 1];
+    size_t recvbuflen = DATA_BUFLEN;
     do {
       conn_status = recv(conn_sock, recvbuf, (int) recvbuflen, 0);
       if (conn_status == SOCKET_ERROR) {
@@ -99,7 +104,7 @@ int main(int argc, char** argv) {
         printf("Read %d bytes.\n", conn_status);
         recvbuf[conn_status] = 0;
 
-        char req_err[DEFAULT_BUFLEN];
+        char req_err[DATA_BUFLEN];
         char *req_data;
         FILE *serv_file = NULL;
         // establish request type
@@ -111,9 +116,9 @@ int main(int argc, char** argv) {
             WT_QUIT(req_err, 1);
           }
         }
-        
+
         // only implementing GET for this assignment
-        
+
 
       }
     } while (conn_status != 0);
@@ -129,20 +134,32 @@ int main(int argc, char** argv) {
 FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
     char **errmsg) {
 
+  char urlbuf[FIELD_BUFLEN + 1], mtdbuf[FIELD_BUFLEN + 1], 
+  verbuf[FIELD_BUFLEN + 1]; 
+  size_t pos;
+  FILE *resource;
+
   // check validity and mark start of data
-  char *end = strstr(req, HTTP_HDR_END);
+  char *end = strstr(req, HTTP_END);
   if (end == NULL) {
-    sprintf(*errmsg, "Malformed HTTP header!");
+    sprintf(*errmsg, "Improperly terminated HTTP header!");
     return NULL;
   }
-  *data = end + sizeof(HTTP_HDR_END);
+  *data = end + sizeof(HTTP_END);
+
+  // parse first line
+  if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
+        FIELD_BUFLEN_STR "s " HTTP_DELIM "%n", mtdbuf, urlbuf, verbuf, &pos) != 3) {
+    sprintf(*errmsg, "Malformed request line!");
+    return NULL;
+  }
+  req += pos;
 
   // identify type of request
   // can be made marginally more efficient by keying the methods on length
-  size_t typelen = strcspn(req, " ");
   int i;
   for (i = 0; i < (int) MTD_COUNT; ++i) {
-    if (strncmp(req, http_mtd_strs[i], typelen) == 0) {
+    if (strcmp(mtdbuf, http_mtd_strs[i]) == 0) {
       *mtd = (enum http_mtd) i;
       break;
     }
@@ -152,9 +169,38 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
     return NULL;
   }
 
-  // only implementing GET for specified filetypes for assignment
+  // read header lines
+  // only supporting Accept and If-Modified-Since
 
+  char acceptbuf[DATA_BUFLEN], modbuf[DATA_BUFLEN];
+  char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
+
+  while (req < end) {
+    if (sscanf(req, "%" FIELD_BUFLEN_STR "s: %" FIELD_BUFLEN_STR "[^\r\n] " 
+          HTTP_DELIM "%n", hdrbuf, valbuf, &pos) != 2) {
+      sprintf(*errmsg, "Malformed header line!");
+      return NULL;
+    }
+  }
+
+  // only implementing GET for specified filetypes for assignment
+  // supporting conditional GET and multithreading
+
+  if (*mtd == GET) {
+
+  }
+
+  sprintf(*errmsg, "Method not supported!");
   return NULL;
+}
+
+/**
+ * Locates a resource, returning its file pointer.
+ */
+FILE *locate(char *url, char *accept) {
+  const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
+  const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
+
 }
 
 /**
