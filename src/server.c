@@ -4,6 +4,7 @@
 #include <ws2tcpip.h>
 #include <stdio.h> 
 #include <string.h>
+#include <ctype.h>
 #include <stdlib.h>
 
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
@@ -135,8 +136,8 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
 
   char urlbuf[FIELD_BUFLEN + 1], mtdbuf[FIELD_BUFLEN + 1], 
   verbuf[FIELD_BUFLEN + 1]; 
-  size_t pos;
-  FILE *resource;
+  size_t linelen;
+  FILE *resource = NULL;
 
   // check validity and mark start of data
   char *end = strstr(req, "\r\n\r\n");
@@ -148,11 +149,11 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
 
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
-        FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &pos) != 3) {
+        FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &linelen) != 3) {
     sprintf(*errmsg, "Malformed request line!");
     return NULL;
   }
-  req += pos;
+  req += linelen;
 
   // identify type of request
   // can be made marginally more efficient by keying the methods on length
@@ -175,9 +176,25 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
 
   while (req < end) {
     if (sscanf(req, "%" FIELD_BUFLEN_STR "s: %" FIELD_BUFLEN_STR "[^\r\n] \r\n%n",
-          hdrbuf, valbuf, &pos) != 2) {
+          hdrbuf, valbuf, &linelen) != 2) {
       sprintf(*errmsg, "Malformed header line!");
       return NULL;
+    }
+    req += linelen;
+
+    // lowercase
+    for (char *p = hdrbuf; *p != 0; ++p) {
+      *p = tolower(*p);
+    }
+
+    if (strcmp(hdrbuf, "accept") == 0) {
+      resource = locate(urlbuf, valbuf);
+      if (resource == NULL) {
+        sprintf(*errmsg, "Requested resource not found!");
+        return NULL;
+      }
+    } else if (strcmp(hdrbuf, "if-modified-since") == 0) {
+      
     }
   }
 
@@ -185,7 +202,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // supporting conditional GET and multithreading
 
   if (*mtd == GET) {
-
+    
   }
 
   sprintf(*errmsg, "Method not supported!");
