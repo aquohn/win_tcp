@@ -5,6 +5,7 @@
 #include <stdio.h> 
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #include <stdlib.h>
 
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
@@ -24,6 +25,13 @@
 #define SRV "srv"
 #define FILE_CNT 3
 
+#define HTTP_BAD_REQ 400
+#define HTTP_NOT_FOUND 404
+#define HTTP_NOT_ACC 406
+#define HTTP_TOO_LARGE 431
+#define HTTP_OK 200
+#define HTTP_NOT_MOD 304
+
 enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
   MTD_COUNT}; // for keeping track of number of methods
 char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
@@ -31,9 +39,9 @@ char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
 
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
-FILE *locate(char *url, char *accept);
+FILE *locate(char *url, char *accept, int *wrong_type);
 FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
-    char **errmsg);
+    int *err);
 
 // compile with -lws2_32 at the END of the command
 
@@ -103,17 +111,17 @@ int main(int argc, char** argv) {
         printf("Read %d bytes.\n", conn_status);
         recvbuf[conn_status] = 0;
 
-        char req_err[DATA_BUFLEN];
+        int err_code;
         char *req_data;
         FILE *serv_file = NULL;
         // establish request type
         if (serv_file == NULL) {
           serv_file = handle_req(recvbuf, &req_mtd, &req_data, 
-              (char **) &req_err);
+              &err_code);
           // something went wrong when prcoessing the header
           if (serv_file == NULL) {
             // TODO send bad request to HTTP client
-            WT_QUIT(req_err, 1);
+            WT_QUIT("Error parsing request!", err_code);
           }
         }
 
@@ -132,17 +140,17 @@ int main(int argc, char** argv) {
  * data starts, and an error message string.
  */
 FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
-    char **errmsg) {
+    int *err) {
 
   char urlbuf[FIELD_BUFLEN + 1], mtdbuf[FIELD_BUFLEN + 1], 
   verbuf[FIELD_BUFLEN + 1]; 
-  size_t linelen;
+  int linelen; 
   FILE *resource = NULL;
 
   // check validity and mark start of data
   char *end = strstr(req, "\r\n\r\n");
   if (end == NULL) {
-    sprintf(*errmsg, "Improperly terminated HTTP header!");
+    *err = HTTP_BAD_REQ;
     return NULL;
   }
   *data = end + sizeof("\r\n\r\n");
@@ -150,7 +158,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
         FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &linelen) != 3) {
-    sprintf(*errmsg, "Malformed request line!");
+    *err = HTTP_BAD_REQ;
     return NULL;
   }
   req += linelen;
@@ -165,7 +173,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
     }
   }
   if (i == (int) MTD_COUNT) {
-    sprintf(*errmsg, "No such HTTP method!");
+    *err = HTTP_BAD_REQ;
     return NULL;
   }
 
@@ -177,20 +185,26 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   while (req < end) {
     if (sscanf(req, "%" FIELD_BUFLEN_STR "s: %" FIELD_BUFLEN_STR "[^\r\n] \r\n%n",
           hdrbuf, valbuf, &linelen) != 2) {
-      sprintf(*errmsg, "Malformed header line!");
+      *err = HTTP_BAD_REQ;
       return NULL;
     }
     req += linelen;
 
     // lowercase
-    for (char *p = hdrbuf; *p != 0; ++p) {
+    char *p;
+    for (p = hdrbuf; *p != 0; ++p) {
       *p = tolower(*p);
     }
 
     if (strcmp(hdrbuf, "accept") == 0) {
-      resource = locate(urlbuf, valbuf);
+      int wrong_type;
+      resource = locate(urlbuf, valbuf, &wrong_type);
       if (resource == NULL) {
-        sprintf(*errmsg, "Requested resource not found!");
+        if (wrong_type) {
+          *err = HTTP_NOT_ACC;
+        } else {
+          *err = HTTP_NOT_FOUND;
+        }
         return NULL;
       }
     } else if (strcmp(hdrbuf, "if-modified-since") == 0) {
@@ -202,19 +216,17 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // supporting conditional GET and multithreading
 
   if (*mtd == GET) {
-    
+
   }
 
-  sprintf(*errmsg, "Method not supported!");
+  *err = HTTP_BAD_REQ; // method not supported
   return NULL;
 }
 
 /**
  * Locates a resource, returning its file pointer.
  */
-FILE *locate(char *url, char *accept) {
-  const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
-  const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
+FILE *locate(char *url, char *accept, int *wrong_type) {
 
 }
 
