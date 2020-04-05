@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
 #define WT_QUIT(MSG, CODE) close_serv(); WT_DIE(MSG, CODE)
@@ -146,6 +147,8 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   verbuf[FIELD_BUFLEN + 1]; 
   int linelen; 
   FILE *resource = NULL;
+  time_t cli_mod_time;
+  int if_mod_since = 0;
 
   // check validity and mark start of data
   char *end = strstr(req, "\r\n\r\n");
@@ -208,17 +211,71 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
         return NULL;
       }
     } else if (strcmp(hdrbuf, "if-modified-since") == 0) {
-      
+      // supporting only recommended timestamp
+      // yday and wday are ignored
+      struct tm mod;
+      mod.tm_isdst = 0;
+      char month[4];
+      int year;
+
+      // can be optimised with a proper hash table
+      char *months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+        "Sep", "Oct", "Nov", "Dec"};
+
+      if (sscanf(valbuf, "%*3s, %d %3s %d %d:%d:%d GMT", &mod.tm_mday,
+            month, &year, &mod.tm_hour, &mod.tm_min, &mod.tm_sec) != 6) {
+        *err = HTTP_BAD_REQ;
+        return NULL;
+      }
+      mod.tm_year = year - 1900;
+      int j;
+      for (j = 0; j < 12; ++j) {
+        if (strcmp(month, months[j]) == 0) {
+          mod.tm_mon = j;
+          break;
+        }
+      }
+      if (j == 12) {
+        *err = HTTP_BAD_REQ;
+        return NULL;
+      }
+      if_mod_since = 1;
+      cli_mod_time = mktime(&mod);
     }
   }
 
-  // only implementing GET for specified filetypes for assignment
-  // supporting conditional GET and multithreading
-
-  if (*mtd == GET) {
-
+  int wrong_type;
+  if (resource == NULL) {
+    locate(urlbuf, NULL, &wrong_type);
   }
 
+  // still NULL implies error
+  if (resource == NULL) {
+    if (wrong_type) {
+      *err = HTTP_NOT_ACC;
+    } else {
+      *err = HTTP_NOT_FOUND;
+    }
+    return NULL;
+  }
+
+  // only implementing GET for specified filetypes for assignment
+  // supporting conditional GET and select()
+  if (*mtd == GET) {
+    // check last modified
+    if (if_mod_since) {
+      struct stat resource_status; 
+      fstat(fileno(resource), &resource_status);
+      if (resource_status.st_mtime <= cli_mod_time) {
+        fclose(resource);
+        *err = HTTP_NOT_MOD;
+        return NULL;
+      }
+    }
+    return resource;    
+  } // other future functions here...
+
+  fclose(resource);
   *err = HTTP_BAD_REQ; // method not supported
   return NULL;
 }
@@ -227,7 +284,24 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
  * Locates a resource, returning its file pointer.
  */
 FILE *locate(char *url, char *accept, int *wrong_type) {
+  const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
+  const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
+  char path[FIELD_BUFLEN + sizeof(SRV) + 1] = SRV;
+  *wrong_type = 0;
 
+  int i;
+  for (i = 0; i < FILE_CNT; ++i) {
+    if (strcmp(url, filenames[i]) == 0) {
+      if (accept && strcmp(accept, mime[i])) {
+        strcpy(path + sizeof(SRV), filenames[FILE_CNT]);
+        return fopen(path, "rb");
+      } else {
+        *wrong_type = 1;
+        return NULL;
+      }
+    }
+  }
+  return NULL;
 }
 
 /**
