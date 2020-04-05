@@ -20,8 +20,6 @@
 #ifdef DELETE
 #undef DELETE
 #endif
-#define HTTP_DELIM "\r\n"
-#define HTTP_END "\r\n\r\n"
 #define SRV "srv"
 #define FILE_CNT 3
 
@@ -113,6 +111,7 @@ int main(int argc, char** argv) {
               (char **) &req_err);
           // something went wrong when prcoessing the header
           if (serv_file == NULL) {
+            // TODO send bad request to HTTP client
             WT_QUIT(req_err, 1);
           }
         }
@@ -140,16 +139,16 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   FILE *resource;
 
   // check validity and mark start of data
-  char *end = strstr(req, HTTP_END);
+  char *end = strstr(req, "\r\n\r\n");
   if (end == NULL) {
     sprintf(*errmsg, "Improperly terminated HTTP header!");
     return NULL;
   }
-  *data = end + sizeof(HTTP_END);
+  *data = end + sizeof("\r\n\r\n");
 
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
-        FIELD_BUFLEN_STR "s " HTTP_DELIM "%n", mtdbuf, urlbuf, verbuf, &pos) != 3) {
+        FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &pos) != 3) {
     sprintf(*errmsg, "Malformed request line!");
     return NULL;
   }
@@ -171,13 +170,12 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
 
   // read header lines
   // only supporting Accept and If-Modified-Since
-
   char acceptbuf[DATA_BUFLEN], modbuf[DATA_BUFLEN];
   char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
 
   while (req < end) {
-    if (sscanf(req, "%" FIELD_BUFLEN_STR "s: %" FIELD_BUFLEN_STR "[^\r\n] " 
-          HTTP_DELIM "%n", hdrbuf, valbuf, &pos) != 2) {
+    if (sscanf(req, "%" FIELD_BUFLEN_STR "s: %" FIELD_BUFLEN_STR "[^\r\n] \r\n%n",
+          hdrbuf, valbuf, &pos) != 2) {
       sprintf(*errmsg, "Malformed header line!");
       return NULL;
     }
