@@ -130,8 +130,11 @@ int main(int argc, char** argv) {
       printf("Connection closed by server.\n");
       break;
     } 
-
+    
+    printf("Receieved %d bytes\n", recv_status);
     printf("Data received: %s\n\n", recvbuf);
+
+    // TODO malloc a buffer and resize as data comes in
   }
 
   close_cli();

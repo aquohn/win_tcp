@@ -30,6 +30,7 @@
 #undef DELETE
 #endif
 #define SRV "srv"
+#define SRV_LEN 3
 #define FILE_CNT 3
 
 #define HTTP_BAD_REQ 400
@@ -149,7 +150,7 @@ int main(int argc, char** argv) {
         size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
 
         char buflen_hexstr[HEXSTR_MAXLEN + 2 + 1];
-        sprintf(buflen_hexstr, "%x\r\n", DATA_BUFLEN);
+        sprintf(buflen_hexstr, "%X\r\n", DATA_BUFLEN);
         size_t full_hexstr_len = strlen(buflen_hexstr);
 
         int status;
@@ -177,7 +178,7 @@ int main(int argc, char** argv) {
         }
 
         // write last chunk
-        sprintf(buflen_hexstr, "%x\r\n", last_chunk_size);
+        sprintf(buflen_hexstr, "%X\r\n", last_chunk_size);
         size_t last_hexstr_len = strlen(buflen_hexstr);
         strcpy(sendbuf, buflen_hexstr);
         fread(sendbuf + last_hexstr_len, last_chunk_size, 1, serv_file);
@@ -195,7 +196,7 @@ int main(int argc, char** argv) {
           status = WSAGetLastError();
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
-        debug_print("Sent end of chunk: %s\n", sendbuf);
+        debug_print("Sent end of chunk: %s\n", chunk_end);
 
         break;
       }
@@ -226,7 +227,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
     *err = HTTP_BAD_REQ;
     return NULL;
   }
-  *data = end + sizeof("\r\n\r\n");
+  *data = end + strlen("\r\n\r\n");
 
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
@@ -270,13 +271,15 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
       return NULL;
     }
     req += linelen;
+    debug_print("Processing %s...\n", hdrbuf);
 
-    // lowercase
+    // lowercase field names for comparison
     char *p;
     for (p = hdrbuf; *p != 0; ++p) {
       *p = tolower(*p);
     }
 
+    // check various supported headers
     if (strcmp(hdrbuf, "accept") == 0) {
       int wrong_type;
       resource = locate(urlbuf, valbuf, &wrong_type);
@@ -300,18 +303,13 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
     }
   }
 
-  int wrong_type;
   if (resource == NULL) {
-    locate(urlbuf, NULL, &wrong_type);
+    resource = locate(urlbuf, NULL, NULL);
   }
 
   // still NULL implies error
   if (resource == NULL) {
-    if (wrong_type) {
-      *err = HTTP_NOT_ACC;
-    } else {
-      *err = HTTP_NOT_FOUND;
-    }
+    *err = HTTP_NOT_FOUND;
     return NULL;
   }
 
@@ -334,20 +332,26 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
  * Locates a resource, returning its file pointer.
  */
 FILE *locate(char *url, char *accept, int *wrong_type) {
+  debug_print("Finding file %s...\n", url);
   const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
   const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
-  char path[FIELD_BUFLEN + sizeof(SRV) + 1] = SRV;
-  *wrong_type = 0;
+  char path[FIELD_BUFLEN + SRV_LEN + 1] = SRV;
+  if (wrong_type) {
+    *wrong_type = 0;
+  }
 
   int i;
   for (i = 0; i < FILE_CNT; ++i) {
+    /* debug_print("strcmp(%s, %s) == %d\n", url, filenames[i], 
+        strcmp(url, filenames[i])); */
     if (strcmp(url, filenames[i]) == 0) {
-      if (accept && (strcmp(accept, mime[i]) == 0)) {
-        strcpy(path + sizeof(SRV), filenames[FILE_CNT]);
-        return fopen(path, "rb");
-      } else {
+      if (accept && (strcmp(accept, mime[i]) != 0) && wrong_type) {
         *wrong_type = 1;
         return NULL;
+      } else {
+        strcpy(path + SRV_LEN, filenames[i]);
+        debug_print("Full path: %s\n", path);
+        return fopen(path, "rb");
       }
     }
   }
