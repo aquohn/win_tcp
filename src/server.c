@@ -30,6 +30,7 @@
 #define HTTP_NOT_FOUND 404
 #define HTTP_NOT_ACC 406
 #define HTTP_TOO_LARGE 431
+#define HTTP_WRONG_VER 505
 #define HTTP_OK 200
 #define HTTP_NOT_MOD 304
 
@@ -121,14 +122,19 @@ int main(int argc, char** argv) {
               &err_code);
           // something went wrong when prcoessing the header
           if (serv_file == NULL) {
-            // TODO send bad request to HTTP client
+            // TODO send error code to HTTP client
             WT_QUIT("Error parsing request!", err_code);
           }
         }
 
         // only implementing GET for this assignment
+        // send in chunks
+        if (req_mtd == GET) {
+          char sendbuf[DATA_BUFLEN];
+          
+        }
 
-
+        
       }
     } while (conn_status != 0);
   }
@@ -177,6 +183,13 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   }
   if (i == (int) MTD_COUNT) {
     *err = HTTP_BAD_REQ;
+    return NULL;
+  }
+
+  // check HTTP version
+  // only supporting HTTP/1.1
+  if (strcmp(verbuf, "HTTP/1.1") != 0) {
+    *err = HTTP_WRONG_VER;
     return NULL;
   }
 
@@ -259,25 +272,17 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
     return NULL;
   }
 
-  // only implementing GET for specified filetypes for assignment
-  // supporting conditional GET and select()
-  if (*mtd == GET) {
-    // check last modified
-    if (if_mod_since) {
-      struct stat resource_status; 
-      fstat(fileno(resource), &resource_status);
-      if (resource_status.st_mtime <= cli_mod_time) {
-        fclose(resource);
-        *err = HTTP_NOT_MOD;
-        return NULL;
-      }
+  // check last modified
+  if (if_mod_since) {
+    struct stat resource_status; 
+    fstat(fileno(resource), &resource_status);
+    if (resource_status.st_mtime <= cli_mod_time) {
+      fclose(resource);
+      *err = HTTP_NOT_MOD;
+      return NULL;
     }
-    return resource;    
-  } // other future functions here...
-
-  fclose(resource);
-  *err = HTTP_BAD_REQ; // method not supported
-  return NULL;
+  }
+  return resource;    
 }
 
 /**
