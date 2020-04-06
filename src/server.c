@@ -12,6 +12,14 @@
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
 #define WT_QUIT(MSG, CODE) close_serv(); WT_DIE(MSG, CODE)
 
+#define DEBUG 1
+
+#ifdef DEBUG
+#define DEBUGPRINT(...) printf(__VA_ARGS__)
+#else
+#define DEBUGPRINT(...) 
+#endif
+
 #define DATA_BUFLEN 1024
 #define DEFAULT_PORT 33333
 #define ADDR_BUFLEN 32
@@ -28,6 +36,7 @@
 
 #define HTTP_BAD_REQ 400
 #define HTTP_NOT_FOUND 404
+#define HTTP_WRONG_MTD 404
 #define HTTP_NOT_ACC 406
 #define HTTP_TOO_LARGE 431
 #define HTTP_WRONG_VER 505
@@ -113,6 +122,8 @@ int main(int argc, char** argv) {
         printf("Read %d bytes.\n", conn_status);
         recvbuf[conn_status] = 0;
 
+        DEBUGPRINT("Data received: %s\n\n", recvbuf);
+
         int err_code;
         char *req_data;
         FILE *serv_file = NULL;
@@ -130,8 +141,11 @@ int main(int argc, char** argv) {
         // only implementing GET for this assignment
         // send in chunks
         if (req_mtd == GET) {
+          struct stat file_status;
+          fstat(fileno(serv_file), &file_status);
+          size_t full_chunks = file_status.st_size / DATA_BUFLEN;
+          size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
           char sendbuf[DATA_BUFLEN];
-          
         }
 
         
@@ -159,6 +173,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // check validity and mark start of data
   char *end = strstr(req, "\r\n\r\n");
   if (end == NULL) {
+    DEBUGPRINT("No header terminator!");
     *err = HTTP_BAD_REQ;
     return NULL;
   }
@@ -167,6 +182,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
         FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &linelen) != 3) {
+    DEBUGPRINT("Wrong request line!");
     *err = HTTP_BAD_REQ;
     return NULL;
   }
@@ -182,7 +198,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
     }
   }
   if (i == (int) MTD_COUNT) {
-    *err = HTTP_BAD_REQ;
+    *err = HTTP_WRONG_MTD;
     return NULL;
   }
 
@@ -195,7 +211,6 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
 
   // read header lines
   // only supporting Accept and If-Modified-Since
-  char acceptbuf[DATA_BUFLEN], modbuf[DATA_BUFLEN];
   char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
 
   while (req < end) {
