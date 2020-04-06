@@ -21,6 +21,7 @@
 #endif
 
 #define DATA_BUFLEN 1024
+#define DATA_BUFLEN_STR "1024"
 #define DEFAULT_PORT 33333
 #define ADDR_BUFLEN 32
 #define FIELD_BUFLEN 128
@@ -214,8 +215,9 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
 
   while (req < end) {
-    if (sscanf(req, "%" FIELD_BUFLEN_STR "s: %" FIELD_BUFLEN_STR "[^\r\n] \r\n%n",
-          hdrbuf, valbuf, &linelen) != 2) {
+    if (sscanf(req, " %" FIELD_BUFLEN_STR "[^ :\r\n]: %" DATA_BUFLEN_STR 
+          "[^\r\n] \r\n%n", hdrbuf, valbuf, &linelen) != 2) {
+      DEBUGPRINT("Invalid header line: %s\n", req);
       *err = HTTP_BAD_REQ;
       return NULL;
     }
@@ -312,7 +314,7 @@ FILE *locate(char *url, char *accept, int *wrong_type) {
   int i;
   for (i = 0; i < FILE_CNT; ++i) {
     if (strcmp(url, filenames[i]) == 0) {
-      if (accept && strcmp(accept, mime[i])) {
+      if (accept && (strcmp(accept, mime[i]) == 0)) {
         strcpy(path + sizeof(SRV), filenames[FILE_CNT]);
         return fopen(path, "rb");
       } else {

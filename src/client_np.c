@@ -74,13 +74,13 @@ int main(int argc, char** argv) {
   const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
   const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
 
-  for (int i = 0; i < FILE_CNT; ++i) {
+  /* for (int i = 0; i < FILE_CNT; ++i) {
     strncpy(bufptr, filenames[i], strlen(filenames[i]));
     if (send(sock, buf, strlen(buf), 0) < 0) {
       status = WSAGetLastError();
       ERRPRINT("Failed to send data!", status);
     }
-  }
+  } */
 
 
   char *ok_query = "GET /c.txt HTTP/1.1\r\n"
