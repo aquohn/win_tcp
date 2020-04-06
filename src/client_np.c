@@ -8,24 +8,50 @@
 
 #define ERRPRINT(MSG, CODE) printf(MSG " Error code: %d\n", CODE); exit(1);
 
-#define DEFAULT_BUFLEN 16
-#define DEFAULT_PORT 33333
-#define ADDR_BUFLEN 32
-#define SERV_IP_ADDR "127.0.0.1"
+#define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
+#define WT_QUIT(MSG, CODE) close_cli(); WT_DIE(MSG, CODE)
 
+#define DEBUG 1
+
+#define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
+
+#define SERV_IP_ADDR "127.0.0.1"
+#define DEFAULT_PORT 33333
+#define DATA_BUFLEN 1024
+#define DATA_BUFLEN_STR "1024"
+#define ADDR_BUFLEN 32
+#define FIELD_BUFLEN 128
+#define FIELD_BUFLEN_STR "128"
+#define HEXSTR_MAXLEN 64
+#define BACKLOG 5
+
+// some Windows macro I'm not using
+#ifdef DELETE
+#undef DELETE
+#endif
 #define USR "usr"
 #define PATH_LEN 255
 #define FILE_CNT 3
+
+#define HTTP_BAD_REQ 400
+#define HTTP_NOT_FOUND 404
+#define HTTP_WRONG_MTD 404
+#define HTTP_NOT_ACC 406
+#define HTTP_TOO_LARGE 431
+#define HTTP_WRONG_VER 505
+#define HTTP_OK 200
+#define HTTP_NOT_MOD 304
+
 
 // compile with -lws2_32 at the END of the command
 
 SOCKET sock = INVALID_SOCKET; // for receiving connections
 
 void close_cli() {
-    printf("\nClosing sockets.\n");
-    shutdown(sock, SD_BOTH);
-    closesocket(sock);
-    WSACleanup();
+  printf("\nClosing sockets.\n");
+  shutdown(sock, SD_BOTH);
+  closesocket(sock);
+  WSACleanup();
 }
 
 BOOL WINAPI int_handler(DWORD sig_type) {
@@ -75,23 +101,38 @@ int main(int argc, char** argv) {
   const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
 
   /* for (int i = 0; i < FILE_CNT; ++i) {
-    strncpy(bufptr, filenames[i], strlen(filenames[i]));
-    if (send(sock, buf, strlen(buf), 0) < 0) {
-      status = WSAGetLastError();
-      ERRPRINT("Failed to send data!", status);
-    }
-  } */
+     strncpy(bufptr, filenames[i], strlen(filenames[i]));
+     if (send(sock, buf, strlen(buf), 0) < 0) {
+     status = WSAGetLastError();
+     ERRPRINT("Failed to send data!", status);
+     }
+     } */
 
 
   char *ok_query = "GET /c.txt HTTP/1.1\r\n"
-      "Host: localhost\r\n"
-      "Accept: text/plain\r\n"
-      "If-Modified-Since: Thu, 01 Dec 1994 16:00:00 GMT\r\n"
-      "\r\n";
-    if (send(sock, ok_query, strlen(ok_query), 0) < 0) {
-      status = WSAGetLastError();
-      ERRPRINT("Failed to send data!", status);
-    }
+    "Host: localhost\r\n"
+    "Accept: text/plain\r\n"
+    "If-Modified-Since: Thu, 01 Dec 1994 16:00:00 GMT\r\n"
+    "\r\n";
+  if (send(sock, ok_query, strlen(ok_query), 0) < 0) {
+    status = WSAGetLastError();
+    ERRPRINT("Failed to send data!", status);
+  }
+
+  int recv_status = SOCKET_ERROR;
+  char recvbuf[DATA_BUFLEN + 1];
+
+  while (1) {
+    recv_status = recv(sock, recvbuf, DATA_BUFLEN, 0);
+    if (recv_status == SOCKET_ERROR) {
+      WT_QUIT("Error receiving data!", WSAGetLastError());
+    } else if (recv_status == 0) {
+      printf("Connection closed by server.\n");
+      break;
+    } 
+
+    printf("Data received: %s\n\n", recvbuf);
+  }
 
   close_cli();
   return 0;

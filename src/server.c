@@ -14,18 +14,15 @@
 
 #define DEBUG 1
 
-#ifdef DEBUG
-#define DEBUGPRINT(...) printf(__VA_ARGS__)
-#else
-#define DEBUGPRINT(...) 
-#endif
+#define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
 
+#define DEFAULT_PORT 33333
 #define DATA_BUFLEN 1024
 #define DATA_BUFLEN_STR "1024"
-#define DEFAULT_PORT 33333
 #define ADDR_BUFLEN 32
 #define FIELD_BUFLEN 128
 #define FIELD_BUFLEN_STR "128"
+#define HEXSTR_MAXLEN 64
 #define BACKLOG 5
 
 // some Windows macro I'm not using
@@ -110,48 +107,98 @@ int main(int argc, char** argv) {
     enum http_mtd req_mtd;
 
     // Read in data
-    int conn_status = SOCKET_ERROR;
+    int recv_status = SOCKET_ERROR;
     char recvbuf[DATA_BUFLEN + 1];
-    size_t recvbuflen = DATA_BUFLEN;
-    do {
-      conn_status = recv(conn_sock, recvbuf, (int) recvbuflen, 0);
-      if (conn_status == SOCKET_ERROR) {
+    while (1) {
+      recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
+      if (recv_status == SOCKET_ERROR) {
         WT_QUIT("Error receiving data!", WSAGetLastError());
-      } else if (conn_status == 0) {
+      } else if (recv_status == 0) {
         printf("Connection closed by client.\n");
-      } else {
-        printf("Read %d bytes.\n", conn_status);
-        recvbuf[conn_status] = 0;
+        break;
+      } 
 
-        DEBUGPRINT("Data received: %s\n\n", recvbuf);
+      printf("Read %d bytes.\n", recv_status);
+      recvbuf[recv_status] = 0;
 
-        int err_code;
-        char *req_data;
-        FILE *serv_file = NULL;
-        // establish request type
-        if (serv_file == NULL) {
-          serv_file = handle_req(recvbuf, &req_mtd, &req_data, 
-              &err_code);
-          // something went wrong when prcoessing the header
-          if (serv_file == NULL) {
-            // TODO send error code to HTTP client
-            WT_QUIT("Error parsing request!", err_code);
+      debug_print("Data received: %s\n\n", recvbuf);
+
+      int err_code;
+      char *req_data;
+      FILE *serv_file = NULL;
+      // establish request type
+      serv_file = handle_req(recvbuf, &req_mtd, &req_data, 
+          &err_code);
+      // something went wrong when prcoessing the header
+      if (serv_file == NULL) {
+        // TODO send error code to HTTP client
+        WT_QUIT("Error parsing request!", err_code);
+      }
+      
+      debug_print("Method is %s\n", http_mtd_strs[(int) req_mtd]);
+
+      // only implementing GET for this assignment
+      // send in chunks
+      // format is <chunk size in hex>\r\n<chunk>\r\n
+      if (req_mtd == GET) {
+
+        struct stat file_status;
+        fstat(fileno(serv_file), &file_status);
+        size_t full_chunks = file_status.st_size / DATA_BUFLEN;
+        size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
+
+        char buflen_hexstr[HEXSTR_MAXLEN + 2 + 1];
+        sprintf(buflen_hexstr, "%x\r\n", DATA_BUFLEN);
+        size_t full_hexstr_len = strlen(buflen_hexstr);
+
+        int status;
+
+        char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
+
+        debug_print("Writing out chunks...\n");
+
+        // TODO write response line
+
+        // write full chunks
+        if (full_chunks > 0) {
+          strcpy(sendbuf, buflen_hexstr);
+          size_t c;
+          for (c = 0; c < full_chunks; ++c) {
+            fread(sendbuf + full_hexstr_len, DATA_BUFLEN, 1, serv_file);
+            sendbuf[full_hexstr_len + DATA_BUFLEN] = '\r';
+            sendbuf[full_hexstr_len + DATA_BUFLEN + 1] = '\n';
+            if (send(conn_sock, sendbuf, full_hexstr_len + DATA_BUFLEN + 2, 0) < 0) {
+              status = WSAGetLastError();
+              WT_QUIT("Failed to send data!", WSAGetLastError());
+            }
+            debug_print("Sent full chunk: %s\n", sendbuf);
           }
         }
 
-        // only implementing GET for this assignment
-        // send in chunks
-        if (req_mtd == GET) {
-          struct stat file_status;
-          fstat(fileno(serv_file), &file_status);
-          size_t full_chunks = file_status.st_size / DATA_BUFLEN;
-          size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
-          char sendbuf[DATA_BUFLEN];
+        // write last chunk
+        sprintf(buflen_hexstr, "%x\r\n", last_chunk_size);
+        size_t last_hexstr_len = strlen(buflen_hexstr);
+        strcpy(sendbuf, buflen_hexstr);
+        fread(sendbuf + last_hexstr_len, last_chunk_size, 1, serv_file);
+        sendbuf[last_hexstr_len + last_chunk_size] = '\r';
+        sendbuf[last_hexstr_len + last_chunk_size + 1] = '\n';
+        if (send(conn_sock, sendbuf, last_hexstr_len + last_chunk_size + 2, 0) < 0) {
+          status = WSAGetLastError();
+          WT_QUIT("Failed to send data!", WSAGetLastError());
         }
+        debug_print("Sent last chunk: %s\n", sendbuf);
 
-        
+        const char *chunk_end = "0\r\n\r\n";
+        // signal end of chunks
+        if (send(conn_sock, chunk_end, strlen(chunk_end), 0) < 0) {
+          status = WSAGetLastError();
+          WT_QUIT("Failed to send data!", WSAGetLastError());
+        }
+        debug_print("Sent end of chunk: %s\n", sendbuf);
+
+        break;
       }
-    } while (conn_status != 0);
+    } 
   }
   return 0;
 }  
@@ -174,7 +221,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // check validity and mark start of data
   char *end = strstr(req, "\r\n\r\n");
   if (end == NULL) {
-    DEBUGPRINT("No header terminator!");
+    debug_print("No header terminator!");
     *err = HTTP_BAD_REQ;
     return NULL;
   }
@@ -183,7 +230,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
         FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &linelen) != 3) {
-    DEBUGPRINT("Wrong request line!");
+    debug_print("Wrong request line!");
     *err = HTTP_BAD_REQ;
     return NULL;
   }
@@ -217,7 +264,7 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
   while (req < end) {
     if (sscanf(req, " %" FIELD_BUFLEN_STR "[^ :\r\n]: %" DATA_BUFLEN_STR 
           "[^\r\n] \r\n%n", hdrbuf, valbuf, &linelen) != 2) {
-      DEBUGPRINT("Invalid header line: %s\n", req);
+      debug_print("Invalid header line: %s\n", req);
       *err = HTTP_BAD_REQ;
       return NULL;
     }
@@ -241,36 +288,14 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
         return NULL;
       }
     } else if (strcmp(hdrbuf, "if-modified-since") == 0) {
-      // supporting only recommended timestamp
-      // yday and wday are ignored
       struct tm mod;
-      mod.tm_isdst = 0;
-      char month[4];
-      int year;
-
-      // can be optimised with a proper hash table
-      char *months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
-        "Sep", "Oct", "Nov", "Dec"};
-
-      if (sscanf(valbuf, "%*3s, %d %3s %d %d:%d:%d GMT", &mod.tm_mday,
-            month, &year, &mod.tm_hour, &mod.tm_min, &mod.tm_sec) != 6) {
+      if (!parse_timestamp(valbuf, &mod)) {
+        debug_print("Invalid timestamp: %s\n", valbuf);
         *err = HTTP_BAD_REQ;
         return NULL;
       }
-      mod.tm_year = year - 1900;
-      int j;
-      for (j = 0; j < 12; ++j) {
-        if (strcmp(month, months[j]) == 0) {
-          mod.tm_mon = j;
-          break;
-        }
-      }
-      if (j == 12) {
-        *err = HTTP_BAD_REQ;
-        return NULL;
-      }
-      if_mod_since = 1;
       cli_mod_time = mktime(&mod);
+      if_mod_since = 1;
     }
   }
 
@@ -324,6 +349,39 @@ FILE *locate(char *url, char *accept, int *wrong_type) {
     }
   }
   return NULL;
+}
+
+/**
+ * Parses a timestamp in the recommended format.
+ */
+int parse_timestamp(char *timestamp, struct tm *timestruct) {
+  // yday and wday are ignored
+  timestruct->tm_isdst = 0;
+  char month[4];
+  int year;
+
+  // can be optimised with a proper hash table
+  char *months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+    "Sep", "Oct", "Nov", "Dec"};
+
+  if (sscanf(timestamp, "%*3s, %d %3s %d %d:%d:%d GMT", &timestruct->tm_mday,
+        month, &year, &timestruct->tm_hour, &timestruct->tm_min, 
+        &timestruct->tm_sec) != 6) {
+    return 0;
+  }
+  timestruct->tm_year = year - 1900;
+  int i;
+  for (i = 0; i < 12; ++i) {
+    if (strcmp(month, months[i]) == 0) {
+      timestruct->tm_mon = i;
+      break;
+    }
+  }
+  if (i == 12) {
+    return 0;
+  }
+
+  return 1;
 }
 
 /**
