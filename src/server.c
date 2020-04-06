@@ -49,6 +49,7 @@ char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
 FILE *locate(char *url, char *accept, int *wrong_type);
+int parse_timestamp(char *timestamp, struct tm *timestruct);
 FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
     int *err);
 
@@ -324,6 +325,8 @@ FILE * handle_req(const char *req, enum http_mtd *mtd, char **data,
       return NULL;
     }
   }
+
+  debug_print("All checks passed, returning resource.\n");
   return resource;    
 }
 
