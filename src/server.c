@@ -2,6 +2,12 @@
 
 #define WIN32_MEAN_AND_LEAN
 
+#ifdef _WIN32
+#define LL_FMT "I64"
+#else
+#define LL_FMT "ll"
+#endif
+
 #include <winsock2.h> // MUST BE INCLUDED BEFORE STDIO
 #include <ws2tcpip.h>
 #include <stdio.h> 
@@ -13,12 +19,12 @@
 #include <sys/stat.h>
 #include <assert.h>
 
+#define DEBUG 1
+
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
-#define WT_DISCONN(SOCK) fprintf(stderr, "Unable to send messages, shutting down socket\n"); shutdown(SOCK, SD_BOTH); closesocket(SOCK); break 
-#define WT_SENDERR(ERR, SOCK) if (err_resp(ERR)) { fprintf(stderr, "Error message sent\n"); continue; } else { WT_DISCONN(SOCK); }
-
-#define DEBUG 1
+#define WT_DISCONN(SOCK) shutdown(SOCK, SD_BOTH); closesocket(SOCK); break 
+#define WT_SENDERR(ERR, SOCK) if (err_resp(ERR)) { continue; } else { WT_DISCONN(SOCK); }
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
 #define append(str1, str2) str1 = _strcpy(str1, str2)
@@ -166,7 +172,12 @@ int main(int argc, char** argv) {
       fstat(fileno(serv_file), &file_status);
 
       if (serv_file == NULL) {
-        WT_SENDERR(errcode, conn_sock);
+        if (!info.keep_alive) {
+          err_resp(errcode);
+          WT_DISCONN(conn_sock);
+        } else {
+          WT_SENDERR(errcode, conn_sock);
+        }
       }
 
       // check last modified
@@ -174,7 +185,12 @@ int main(int argc, char** argv) {
         if (file_status.st_mtime <= info.if_mod_since_time) {
           fclose(serv_file);
           errcode = HTTP_NOT_MOD;
-          WT_SENDERR(errcode, conn_sock);
+          if (!info.keep_alive) {
+            err_resp(errcode);
+            WT_DISCONN(conn_sock);
+          } else {
+            WT_SENDERR(errcode, conn_sock);
+          }
         }
       }
 
@@ -218,7 +234,7 @@ int main(int argc, char** argv) {
         debug_print("HTTP response header: %s\n", sendbuf);
 
         char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
-        sprintf(chunklen_hexstr, "%X\r\n", full_chunk_size);
+        sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", full_chunk_size);
         size_t full_hexstr_len = strlen(chunklen_hexstr);
 
         debug_print("Writing out chunks...\n");
@@ -242,7 +258,7 @@ int main(int argc, char** argv) {
         }
 
         // write last chunk
-        sprintf(chunklen_hexstr, "%X\r\n", last_chunk_size);
+        sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", last_chunk_size);
         size_t last_hexstr_len = strlen(chunklen_hexstr);
         sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
         sendbufend = sendbufcurr + fread(sendbufcurr, 1, last_chunk_size, 
@@ -266,14 +282,13 @@ int main(int argc, char** argv) {
         //debug_print("Sent end of chunks: %s\n", chunk_end);
         fclose(serv_file);
       } else {
-        // HTTP_WRONG_MTD
+        errcode = HTTP_WRONG_MTD;
+        WT_SENDERR(errcode, conn_sock);
       }
 
       if (!info.keep_alive) {
-        shutdown(conn_sock, SD_BOTH);
-        closesocket(conn_sock);
         printf("Connection completed and closed.\n");
-        break;
+        WT_DISCONN(conn_sock);
       }
     } 
   }
