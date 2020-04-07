@@ -84,6 +84,7 @@ FILE *locate(char *url, char *accept, int *errcode, const char **type);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
 bool parse_req(const char *req, struct reqinfo *info, int *errcode);
 bool send_err_resp(int errcode);
+int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, size_t hexstrlen);
 char *write_date_hdr(char *buf);
 void write_ok_resp(char *resp, struct reqinfo *info, struct stat *file_status,
     const char *type);
@@ -344,13 +345,10 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
   size_t full_chunks = file_status->st_size / full_chunk_size;
   size_t last_chunk_size = file_status->st_size % full_chunk_size;
 
-  char *sendbufcurr, *sendbufend;
+  char *sendbufcurr;
   int send_status = SOCKET_ERROR;
 
-  // response will have Date, Last-Modified, Connection,
-  // Transfer-Encoding and Content-Type
-  // NOTE: this code will result in buffer overflows if DATA_BUFLEN is set
-  // too low
+  // Add Transfer-Encoding to response and send 
 
   append(resp, "Transfer-Encoding: chunked\r\n");
   append(resp, "\r\n");
@@ -371,12 +369,8 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
     sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
     size_t c;
     for (c = 0; c < full_chunks; ++c) {
-      sendbufend = sendbufcurr + fread(sendbufcurr, 
-          1, full_chunk_size, serv_file);
-      strcpy(sendbufend, "\r\n");
-      send_status = send(conn_sock, sendbuf, 
-          full_hexstr_len + full_chunk_size + 2, 0);
-      if (send_status < 0) {
+
+      if (send_chunk(sendbuf, sendbufcurr, full_chunk_size, full_hexstr_len) < 0) {
         return false;
       }
       //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
@@ -387,12 +381,7 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
   sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", last_chunk_size);
   size_t last_hexstr_len = strlen(chunklen_hexstr);
   sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
-  sendbufend = sendbufcurr + fread(sendbufcurr, 1, last_chunk_size, 
-      serv_file);
-  strcpy(sendbufend, "\r\n");
-  send_status = send(conn_sock, sendbuf, 
-      last_hexstr_len + last_chunk_size + 2, 0);
-  if (send_status < 0) {
+  if (send_chunk(sendbuf, sendbufcurr, last_chunk_size, last_hexstr_len) < 0) {
     return false;
   }
   //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
@@ -409,8 +398,18 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
 }
 
 /**
+ * Sends a chunk of data.
+ */
+int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, size_t hexstrlen) {
+  char *endptr = chunkptr + fread(chunkptr, 1, chunklen, serv_file);
+  strcpy(endptr, "\r\n");
+  return send(conn_sock, sendptr, chunklen + hexstrlen + 2, 0);
+}
+
+/**
  * Create a generic OK response usable for any method. Note that this function
- * may overflow the resp buffer if DATA_BUFLEN is too small.
+ * may overflow the resp buffer if DATA_BUFLEN is too small. All responses will
+ * have Date, Last-Modified, Connection and Content-Type.
  */
 void write_ok_resp(char *resp, struct reqinfo *info, struct stat *file_status, 
     const char *type) {
@@ -534,7 +533,7 @@ bool send_err_resp(int errcode) {
   append(bufptr, "\r\n");
   strcpy(write_date_hdr(bufptr), "\r\n");
   if (send(conn_sock, closebuf, strlen(closebuf), 0) < 0) {
-    WT_INFO("Failed to send data!", WSAGetLastError());
+    WT_INFO("Failed to send error response!", WSAGetLastError());
     return false;
   }
   debug_print("Sending %s error to client...\n", errstr);
@@ -558,7 +557,7 @@ void close_serv() {
 
 /**
  * Writes the Date header to the position pointed to by buf. buf must have at
- * least 46 bytes of free space in it.
+ * least 8 + 29 + 2 + 1 = 40 bytes of free space in it.
  */
 char *write_date_hdr(char *buf) {
   buf = _strcpy(buf, "Date: ");
