@@ -50,10 +50,10 @@ char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
 
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
-FILE *locate(char *url, char *accept, int *wrong_type);
+FILE *locate(char *url, char *accept, int *errcode);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
 FILE *handle_req(const char *req, enum http_mtd *mtd, char **data, 
-    int *err);
+    int *errcode);
 char *_strcat(char *destination, const char *source);
 char *_strcpy(char *destination, const char *source);
 
@@ -128,16 +128,16 @@ int main(int argc, char** argv) {
 
       debug_print("Data received: %s\n", recvbuf);
 
-      int err_code;
+      int errcode;
       char *req_data;
       FILE *serv_file = NULL;
       // establish request type
       serv_file = handle_req(recvbuf, &req_mtd, &req_data, 
-          &err_code);
+          &errcode);
       // something went wrong when prcoessing the header
       if (serv_file == NULL) {
         // TODO send error code to HTTP client
-        WT_QUIT("Error parsing request!", err_code);
+        WT_QUIT("Error parsing request!", errcode);
       }
       
       // only implementing GET for this assignment
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
  * data starts, and an error message string.
  */
 FILE *handle_req(const char *req, enum http_mtd *mtd, char **data, 
-    int *err) {
+    int *errcode) {
 
   char urlbuf[FIELD_BUFLEN + 1], mtdbuf[FIELD_BUFLEN + 1], 
   verbuf[FIELD_BUFLEN + 1]; 
@@ -224,7 +224,7 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
   char *end = strstr(req, "\r\n\r\n");
   if (end == NULL) {
     debug_print("No header terminator!");
-    *err = HTTP_BAD_REQ;
+    *errcode = HTTP_BAD_REQ;
     return NULL;
   }
   *data = end + strlen("\r\n\r\n");
@@ -233,7 +233,7 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
         FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &linelen) != 3) {
     debug_print("Wrong request line!");
-    *err = HTTP_BAD_REQ;
+    *errcode = HTTP_BAD_REQ;
     return NULL;
   }
   req += linelen;
@@ -248,14 +248,14 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
     }
   }
   if (i == (int) MTD_COUNT) {
-    *err = HTTP_WRONG_MTD;
+    *errcode = HTTP_WRONG_MTD;
     return NULL;
   }
 
   // check HTTP version
   // only supporting HTTP/1.1
   if (strcmp(verbuf, "HTTP/1.1") != 0) {
-    *err = HTTP_WRONG_VER;
+    *errcode = HTTP_WRONG_VER;
     return NULL;
   }
 
@@ -267,7 +267,7 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
     if (sscanf(req, " %" FIELD_BUFLEN_STR "[^ :\r\n]: %" DATA_BUFLEN_STR 
           "[^\r\n] \r\n%n", hdrbuf, valbuf, &linelen) != 2) {
       debug_print("Invalid header line: %s\n", req);
-      *err = HTTP_BAD_REQ;
+      *errcode = HTTP_BAD_REQ;
       return NULL;
     }
     req += linelen;
@@ -281,21 +281,15 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
 
     // check various supported headers
     if (strcmp(hdrbuf, "accept") == 0) {
-      int wrong_type;
-      resource = locate(urlbuf, valbuf, &wrong_type);
+      resource = locate(urlbuf, valbuf, errcode);
       if (resource == NULL) {
-        if (wrong_type) {
-          *err = HTTP_NOT_ACC;
-        } else {
-          *err = HTTP_NOT_FOUND;
-        }
         return NULL;
       }
     } else if (strcmp(hdrbuf, "if-modified-since") == 0) {
       struct tm mod;
       if (!parse_timestamp(valbuf, &mod)) {
         debug_print("Invalid timestamp: %s\n", valbuf);
-        *err = HTTP_BAD_REQ;
+        *errcode = HTTP_BAD_REQ;
         return NULL;
       }
       cli_mod_time = mktime(&mod);
@@ -307,9 +301,9 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
     resource = locate(urlbuf, NULL, NULL);
   }
 
-  // still NULL implies error
+  // still NULL implies errcodeor
   if (resource == NULL) {
-    *err = HTTP_NOT_FOUND;
+    *errcode = HTTP_NOT_FOUND;
     return NULL;
   }
 
@@ -319,7 +313,7 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
     fstat(fileno(resource), &resource_status);
     if (resource_status.st_mtime <= cli_mod_time) {
       fclose(resource);
-      *err = HTTP_NOT_MOD;
+      *errcode = HTTP_NOT_MOD;
       return NULL;
     }
   }
@@ -331,20 +325,17 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
 /**
  * Locates a resource, returning its file pointer.
  */
-FILE *locate(char *url, char *accept, int *wrong_type) {
+FILE *locate(char *url, char *accept, int *errcode) {
   debug_print("Finding file %s...\n", url);
   const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
   const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
   char path[FIELD_BUFLEN + SRV_LEN + 1] = SRV;
-  if (wrong_type) {
-    *wrong_type = 0;
-  }
 
   int i;
   for (i = 0; i < FILE_CNT; ++i) {
     if (strcmp(url, filenames[i]) == 0) {
-      if (accept && (strcmp(accept, mime[i]) != 0) && wrong_type) {
-        *wrong_type = 1;
+      if (accept && (strcmp(accept, mime[i]) != 0)) {
+        *errcode = HTTP_NOT_ACC;
         return NULL;
       } else {
         strcpy(path + SRV_LEN, filenames[i]);
@@ -353,6 +344,8 @@ FILE *locate(char *url, char *accept, int *wrong_type) {
       }
     }
   }
+
+  *errcode = HTTP_NOT_FOUND;
   return NULL;
 }
 
