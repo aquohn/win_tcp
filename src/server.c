@@ -1,3 +1,5 @@
+// compile with -lws2_32 at the END of the command
+
 #define WIN32_MEAN_AND_LEAN
 
 #include <winsock2.h> // MUST BE INCLUDED BEFORE STDIO
@@ -48,16 +50,28 @@ enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
 char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
   "OPTIONS", "TRACE", "PATCH"};
 
+/**
+ * Struct representing data parsed from request header. Only contains supported
+ * information fields. Supported headers are Accept, Connection,
+ * If-Modified-Since
+ */
+struct reqinfo {
+  enum http_mtd mtd;
+  char url[FIELD_BUFLEN + 1];
+  char accept[FIELD_BUFLEN + 1];
+  bool keep_alive;
+  bool if_mod_since;
+  time_t if_mod_since_time;
+  char *data;
+};
+
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
 FILE *locate(char *url, char *accept, int *errcode);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
-FILE *handle_req(const char *req, enum http_mtd *mtd, char **data, 
-    int *errcode);
+bool parse_req(const char *req, struct reqinfo *info, int *errcode);
 char *_strcat(char *destination, const char *source);
 char *_strcpy(char *destination, const char *source);
-
-// compile with -lws2_32 at the END of the command
 
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
 SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
@@ -124,22 +138,42 @@ int main(int argc, char** argv) {
       } 
 
       printf("Read %d bytes.\n", recv_status);
-      recvbuf[recv_status] = 0;
+      recvbuf[recv_status] = '\0';
 
       debug_print("Data received: %s\n", recvbuf);
 
-      int errcode;
-      char *req_data;
+      int errcode = 0;
+      struct reqinfo info;
       FILE *serv_file = NULL;
-      // establish request type
-      serv_file = handle_req(recvbuf, &req_mtd, &req_data, 
-          &errcode);
-      // something went wrong when prcoessing the header
-      if (serv_file == NULL) {
-        // TODO send error code to HTTP client
-        WT_QUIT("Error parsing request!", errcode);
+
+
+      // TODO send error codes to client instead of quitting
+
+      // parse request header
+      if (!parse_req(recvbuf, &info, &errcode)) {
+        WT_QUIT("Invalid request format!", errcode);
       }
-      
+
+      serv_file = locate(info.url, info.accept, &errcode);
+
+      // still NULL implies errcode
+      if (serv_file == NULL) {
+        WT_QUIT("Error retrieving resource!", errcode);
+        return NULL;
+      }
+
+      // check last modified
+      if (info.if_mod_since) {
+        struct stat serv_file_status; 
+        fstat(fileno(serv_file), &serv_file_status);
+        if (serv_file_status.st_mtime <= info.if_mod_since_time) {
+          fclose(serv_file);
+          WT_QUIT("Resource not required.", HTTP_NOT_MOD);
+        }
+      }
+
+      debug_print("Resource retrieved.\n");
+
       // only implementing GET for this assignment
       // send in chunks
       // format is <chunk size in hex>\r\n<chunk>\r\n
@@ -153,7 +187,7 @@ int main(int argc, char** argv) {
         // TODO write response line
         char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
         char *sendbufcurr, *sendbufend;
-        
+
         _strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
 
         char buflen_hexstr[HEXSTR_MAXLEN + 2 + 1];
@@ -191,8 +225,8 @@ int main(int argc, char** argv) {
         }
         debug_print("Sent last chunk: %s\n", sendbuf);
 
-        const char *chunk_end = "0\r\n\r\n";
         // signal end of chunks
+        const char *chunk_end = "0\r\n\r\n";
         if (send(conn_sock, chunk_end, strlen(chunk_end), 0) < 0) {
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
@@ -206,35 +240,34 @@ int main(int argc, char** argv) {
 }  
 
 /**
- * Parse a HTTP 1.1 request, returning a file handler to the relevant file that
- * needs to be served, indicating the HTTP method used, the position where the
- * data starts, and an error message string.
+ * Parse a HTTP 1.1 request. 
+ *
+ * @param[in] req The text of the request to parse.
+ * @param[out] info A struct holding the supported information contained in the
+ * request.
+ * @param[out] errcode Pointer to the error code to set on encountering an
+ * error.
  */
-FILE *handle_req(const char *req, enum http_mtd *mtd, char **data, 
-    int *errcode) {
+bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
 
-  char urlbuf[FIELD_BUFLEN + 1], mtdbuf[FIELD_BUFLEN + 1], 
-  verbuf[FIELD_BUFLEN + 1]; 
+  char mtdbuf[FIELD_BUFLEN + 1], verbuf[FIELD_BUFLEN + 1]; 
   int linelen; 
-  FILE *resource = NULL;
-  time_t cli_mod_time;
-  int if_mod_since = 0;
 
   // check validity and mark start of data
   char *end = strstr(req, "\r\n\r\n");
   if (end == NULL) {
-    debug_print("No header terminator!");
+    debug_print("No header terminator!\n");
     *errcode = HTTP_BAD_REQ;
-    return NULL;
+    return false;
   }
-  *data = end + strlen("\r\n\r\n");
+  info->data = end + strlen("\r\n\r\n");
 
   // parse first line
   if (sscanf(req, "%" FIELD_BUFLEN_STR "s %" FIELD_BUFLEN_STR "s %" 
-        FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, urlbuf, verbuf, &linelen) != 3) {
-    debug_print("Wrong request line!");
+        FIELD_BUFLEN_STR "s \r\n%n", mtdbuf, info->url, verbuf, &linelen) != 3) {
+    debug_print("Wrong request line!\n");
     *errcode = HTTP_BAD_REQ;
-    return NULL;
+    return false;
   }
   req += linelen;
 
@@ -243,7 +276,7 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
   int i;
   for (i = 0; i < (int) MTD_COUNT; ++i) {
     if (strcmp(mtdbuf, http_mtd_strs[i]) == 0) {
-      *mtd = (enum http_mtd) i;
+      info->mtd = (enum http_mtd) i;
       break;
     }
   }
@@ -263,6 +296,10 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
   // only supporting Accept and If-Modified-Since
   char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
 
+  // initialise info structure
+  info->accept[0] = '\0';
+  info->keep_alive = true;
+
   while (req < end) {
     if (sscanf(req, " %" FIELD_BUFLEN_STR "[^ :\r\n]: %" DATA_BUFLEN_STR 
           "[^\r\n] \r\n%n", hdrbuf, valbuf, &linelen) != 2) {
@@ -281,45 +318,26 @@ FILE *handle_req(const char *req, enum http_mtd *mtd, char **data,
 
     // check various supported headers
     if (strcmp(hdrbuf, "accept") == 0) {
-      resource = locate(urlbuf, valbuf, errcode);
-      if (resource == NULL) {
-        return NULL;
-      }
+      strcpy(info->accept, valbuf);
     } else if (strcmp(hdrbuf, "if-modified-since") == 0) {
       struct tm mod;
       if (!parse_timestamp(valbuf, &mod)) {
         debug_print("Invalid timestamp: %s\n", valbuf);
         *errcode = HTTP_BAD_REQ;
-        return NULL;
+        return false;
       }
-      cli_mod_time = mktime(&mod);
-      if_mod_since = 1;
+      info->if_mod_since = true;
+      info->if_mod_since_time = mktime(&mod);
+    } else if (strcmp(hdrbuf, "connection")) {
+      if (strcmp(valbuf, "keep-alive")) {
+        info->keep_alive = true;
+      } else if (strcmp(valbuf, "close")) {
+        info->keep_alive = false;
+      }
     }
   }
-
-  if (resource == NULL) {
-    resource = locate(urlbuf, NULL, NULL);
-  }
-
-  // still NULL implies errcodeor
-  if (resource == NULL) {
-    *errcode = HTTP_NOT_FOUND;
-    return NULL;
-  }
-
-  // check last modified
-  if (if_mod_since) {
-    struct stat resource_status; 
-    fstat(fileno(resource), &resource_status);
-    if (resource_status.st_mtime <= cli_mod_time) {
-      fclose(resource);
-      *errcode = HTTP_NOT_MOD;
-      return NULL;
-    }
-  }
-
-  debug_print("All checks passed, returning resource.\n");
-  return resource;    
+  debug_print("Header is valid.\n");
+  return true;    
 }
 
 /**
@@ -414,7 +432,7 @@ char *_strcpy(char *destination, const char *source) {
     *(destination++) = s;
     s = *(++source);
   }
-  *(++destination) = 0;
+  *(++destination) = '\0';
   return destination;
 }
 
