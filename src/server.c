@@ -70,7 +70,7 @@ struct reqinfo {
 
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
-FILE *locate(char *url, char *accept, int *errcode, char **type);
+FILE *locate(char *url, char *accept, int *errcode, const char **type);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
 bool parse_req(const char *req, struct reqinfo *info, int *errcode);
 char *_strcat(char *destination, const char *source);
@@ -78,6 +78,7 @@ char *_strcpy(char *destination, const char *source);
 
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
 SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
+FILE *serv_file = NULL;
 
 int main(int argc, char** argv) {
   WSADATA wsa;
@@ -130,6 +131,7 @@ int main(int argc, char** argv) {
     // Read in data
     int recv_status = SOCKET_ERROR;
     char recvbuf[DATA_BUFLEN + 1];
+    char sendbuf[DATA_BUFLEN + 1];
 
     while (1) {
       recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
@@ -149,8 +151,7 @@ int main(int argc, char** argv) {
 
       struct reqinfo info;
       int errcode = 0;
-      FILE *serv_file = NULL;
-      char *type;
+      const char *type;
 
       // parse request header
       if (!parse_req(recvbuf, &info, &errcode)) {
@@ -161,7 +162,6 @@ int main(int argc, char** argv) {
       struct stat file_status;
       fstat(fileno(serv_file), &file_status);
 
-      // still NULL implies errcode
       if (serv_file == NULL) {
         WT_QUIT("Error retrieving resource!", errcode);
       }
@@ -176,21 +176,21 @@ int main(int argc, char** argv) {
 
       debug_print("Resource retrieved.\n");
 
-      // only implementing GET for this assignment
-      // send in chunks
+      // only implementing GET for this assignment, and all transfers are
+      // automatically chunked
       // format is <chunk size in hex>\r\n<chunk>\r\n
       if (info.mtd == GET) {
-        size_t full_chunks = file_status.st_size / DATA_BUFLEN;
-        size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
+        size_t full_chunk_size = DATA_BUFLEN - HEXSTR_MAXLEN - 4;
+        size_t full_chunks = file_status.st_size / full_chunk_size;
+        size_t last_chunk_size = file_status.st_size % full_chunk_size;
 
         // TODO write response line
-        char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
         char *sendbufcurr, *sendbufend;
 
         sendbufcurr = _strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
 
         char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
-        sprintf(chunklen_hexstr, "%X\r\n", DATA_BUFLEN);
+        sprintf(chunklen_hexstr, "%X\r\n", full_chunk_size);
         size_t full_hexstr_len = strlen(chunklen_hexstr);
 
         debug_print("Writing out chunks...\n");
@@ -203,14 +203,14 @@ int main(int argc, char** argv) {
           size_t c;
           for (c = 0; c < full_chunks; ++c) {
             sendbufend = sendbufcurr + fread(sendbufcurr, 
-                1, DATA_BUFLEN, serv_file);
+                1, full_chunk_size, serv_file);
             strcpy(sendbufend, "\r\n");
             send_status = send(conn_sock, sendbuf, 
-                full_hexstr_len + DATA_BUFLEN + 2, 0);
+                full_hexstr_len + full_chunk_size + 2, 0);
             if (send_status < 0) {
               WT_QUIT("Failed to send data!", WSAGetLastError());
             }
-            debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
+            //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
           }
         }
 
@@ -218,17 +218,15 @@ int main(int argc, char** argv) {
         sprintf(chunklen_hexstr, "%X\r\n", last_chunk_size);
         size_t last_hexstr_len = strlen(chunklen_hexstr);
         sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
-        debug_print("After writing size str: %s", sendbuf);
         sendbufend = sendbufcurr + fread(sendbufcurr, 1, last_chunk_size, 
             serv_file);
-        debug_print("Last chunk: %s", sendbufcurr);
         strcpy(sendbufend, "\r\n");
         send_status = send(conn_sock, sendbuf, 
             last_hexstr_len + last_chunk_size + 2, 0);
         if (send_status < 0) {
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
-        debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
+        //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
 
         // signal end of chunks
         const char *chunk_end = "0\r\n\r\n";
@@ -236,8 +234,14 @@ int main(int argc, char** argv) {
         if (send_status < 0) {
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
-        debug_print("Sent end of chunks: %s\n", chunk_end);
-        break;
+        //debug_print("Sent end of chunks: %s\n", chunk_end);
+        fclose(serv_file);
+      }
+
+      if (!info.keep_alive) {
+        shutdown(conn_sock, SD_BOTH);
+        closesocket(conn_sock);
+        printf("Connection completed and closed.\n");
       }
     } 
   }
@@ -333,11 +337,15 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
       }
       info->if_mod_since = true;
       info->if_mod_since_time = mktime(&mod);
-    } else if (strcmp(hdrbuf, "connection")) {
-      if (strcmp(valbuf, "keep-alive")) {
+    } else if (strcmp(hdrbuf, "connection") == 0) {
+      if (strcmp(valbuf, "keep-alive") == 0) {
         info->keep_alive = true;
-      } else if (strcmp(valbuf, "close")) {
+      } else if (strcmp(valbuf, "close") == 0) {
         info->keep_alive = false;
+      } else {
+        debug_print("Invalid connection type: %s\n", valbuf);
+        *errcode = HTTP_BAD_REQ;
+        return false;
       }
     }
   }
@@ -348,7 +356,7 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
 /**
  * Locates a resource, returning its file pointer and MIME type.
  */
-FILE *locate(char *url, char *accept, int *errcode, char **type) {
+FILE *locate(char *url, char *accept, int *errcode, const char **type) {
   debug_print("Finding file %s...\n", url);
   char path[FIELD_BUFLEN + SRV_LEN + 1] = SRV;
 
@@ -418,6 +426,9 @@ BOOL WINAPI int_handler(DWORD sig_type) {
  * Close down server connections and clean up.
  */
 void close_serv() {
+  if (serv_file) {
+    fclose(serv_file);
+  }
   printf("\nClosing sockets.\n");
   shutdown(listen_sock, SD_BOTH);
   shutdown(conn_sock, SD_BOTH);

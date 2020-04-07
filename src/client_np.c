@@ -17,8 +17,8 @@
 
 #define SERV_IP_ADDR "127.0.0.1"
 #define DEFAULT_PORT 33333
-#define DATA_BUFLEN 1024
-#define DATA_BUFLEN_STR "1024"
+#define DATA_BUFLEN 512
+#define DATA_BUFLEN_STR "512"
 #define ADDR_BUFLEN 32
 #define FIELD_BUFLEN 128
 #define FIELD_BUFLEN_STR "128"
@@ -113,6 +113,7 @@ int main(int argc, char** argv) {
     "Host: localhost\r\n"
     "Accept: text/plain\r\n"
     "If-Modified-Since: Wed, 01 Jan 2020 16:00:00 GMT\r\n"
+    "Connection: close\r\n"
     "\r\n";
   if (send(sock, ok_query, strlen(ok_query), 0) < 0) {
     status = WSAGetLastError();
