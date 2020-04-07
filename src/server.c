@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
@@ -50,9 +51,11 @@ char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
 FILE *locate(char *url, char *accept, int *wrong_type);
-int parse_timestamp(char *timestamp, struct tm *timestruct);
-FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
+bool parse_timestamp(char *timestamp, struct tm *timestruct);
+FILE *handle_req(const char *req, enum http_mtd *mtd, char **data, 
     int *err);
+char *_strcat(char *destination, const char *source);
+char *_strcpy(char *destination, const char *source);
 
 // compile with -lws2_32 at the END of the command
 
@@ -123,7 +126,7 @@ int main(int argc, char** argv) {
       printf("Read %d bytes.\n", recv_status);
       recvbuf[recv_status] = 0;
 
-      debug_print("Data received: %s\n\n", recvbuf);
+      debug_print("Data received: %s\n", recvbuf);
 
       int err_code;
       char *req_data;
@@ -137,8 +140,6 @@ int main(int argc, char** argv) {
         WT_QUIT("Error parsing request!", err_code);
       }
       
-      debug_print("Method is %s\n", http_mtd_strs[(int) req_mtd]);
-
       // only implementing GET for this assignment
       // send in chunks
       // format is <chunk size in hex>\r\n<chunk>\r\n
@@ -149,28 +150,29 @@ int main(int argc, char** argv) {
         size_t full_chunks = file_status.st_size / DATA_BUFLEN;
         size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
 
+        // TODO write response line
+        char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
+        char *sendbufcurr, *sendbufend;
+        
+        _strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
+
         char buflen_hexstr[HEXSTR_MAXLEN + 2 + 1];
         sprintf(buflen_hexstr, "%X\r\n", DATA_BUFLEN);
         size_t full_hexstr_len = strlen(buflen_hexstr);
 
         int status;
 
-        char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
-
         debug_print("Writing out chunks...\n");
-
-        // TODO write response line
 
         // write full chunks
         if (full_chunks > 0) {
-          strcpy(sendbuf, buflen_hexstr);
+          sendbufcurr = _strcpy(sendbuf, buflen_hexstr);
           size_t c;
           for (c = 0; c < full_chunks; ++c) {
-            fread(sendbuf + full_hexstr_len, DATA_BUFLEN, 1, serv_file);
-            sendbuf[full_hexstr_len + DATA_BUFLEN] = '\r';
-            sendbuf[full_hexstr_len + DATA_BUFLEN + 1] = '\n';
+            sendbufend = sendbufcurr + fread(sendbuf + full_hexstr_len, 
+                DATA_BUFLEN, 1, serv_file);
+            strcpy(sendbufend, "\r\n");
             if (send(conn_sock, sendbuf, full_hexstr_len + DATA_BUFLEN + 2, 0) < 0) {
-              status = WSAGetLastError();
               WT_QUIT("Failed to send data!", WSAGetLastError());
             }
             debug_print("Sent full chunk: %s\n", sendbuf);
@@ -180,12 +182,11 @@ int main(int argc, char** argv) {
         // write last chunk
         sprintf(buflen_hexstr, "%X\r\n", last_chunk_size);
         size_t last_hexstr_len = strlen(buflen_hexstr);
-        strcpy(sendbuf, buflen_hexstr);
-        fread(sendbuf + last_hexstr_len, last_chunk_size, 1, serv_file);
-        sendbuf[last_hexstr_len + last_chunk_size] = '\r';
-        sendbuf[last_hexstr_len + last_chunk_size + 1] = '\n';
+        sendbufcurr = _strcpy(sendbuf, buflen_hexstr);
+        sendbufend = sendbufcurr + fread(sendbufcurr, last_chunk_size, 
+            1, serv_file);
+        strcpy(sendbufend, "\r\n");
         if (send(conn_sock, sendbuf, last_hexstr_len + last_chunk_size + 2, 0) < 0) {
-          status = WSAGetLastError();
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
         debug_print("Sent last chunk: %s\n", sendbuf);
@@ -193,7 +194,6 @@ int main(int argc, char** argv) {
         const char *chunk_end = "0\r\n\r\n";
         // signal end of chunks
         if (send(conn_sock, chunk_end, strlen(chunk_end), 0) < 0) {
-          status = WSAGetLastError();
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
         debug_print("Sent end of chunk: %s\n", chunk_end);
@@ -210,7 +210,7 @@ int main(int argc, char** argv) {
  * needs to be served, indicating the HTTP method used, the position where the
  * data starts, and an error message string.
  */
-FILE * handle_req(const char *req, enum http_mtd *mtd, char **data, 
+FILE *handle_req(const char *req, enum http_mtd *mtd, char **data, 
     int *err) {
 
   char urlbuf[FIELD_BUFLEN + 1], mtdbuf[FIELD_BUFLEN + 1], 
@@ -342,8 +342,6 @@ FILE *locate(char *url, char *accept, int *wrong_type) {
 
   int i;
   for (i = 0; i < FILE_CNT; ++i) {
-    /* debug_print("strcmp(%s, %s) == %d\n", url, filenames[i], 
-        strcmp(url, filenames[i])); */
     if (strcmp(url, filenames[i]) == 0) {
       if (accept && (strcmp(accept, mime[i]) != 0) && wrong_type) {
         *wrong_type = 1;
@@ -361,7 +359,7 @@ FILE *locate(char *url, char *accept, int *wrong_type) {
 /**
  * Parses a timestamp in the recommended format.
  */
-int parse_timestamp(char *timestamp, struct tm *timestruct) {
+bool parse_timestamp(char *timestamp, struct tm *timestruct) {
   // yday and wday are ignored
   timestruct->tm_isdst = 0;
   char month[4];
@@ -374,7 +372,7 @@ int parse_timestamp(char *timestamp, struct tm *timestruct) {
   if (sscanf(timestamp, "%*3s, %d %3s %d %d:%d:%d GMT", &timestruct->tm_mday,
         month, &year, &timestruct->tm_hour, &timestruct->tm_min, 
         &timestruct->tm_sec) != 6) {
-    return 0;
+    return false;
   }
   timestruct->tm_year = year - 1900;
   int i;
@@ -385,14 +383,15 @@ int parse_timestamp(char *timestamp, struct tm *timestruct) {
     }
   }
   if (i == 12) {
-    return 0;
+    return false;
   }
 
-  return 1;
+  return true;
 }
 
 /**
- * Interrupt handler for Ctrl-C or window close events.
+ * Interrupt handler for Ctrl-C or window close events, implemented
+ * Windows-style because it needs to interact with its API.
  */
 BOOL WINAPI int_handler(DWORD sig_type) {
   if (sig_type == CTRL_C_EVENT || sig_type == CTRL_BREAK_EVENT) {
@@ -411,4 +410,27 @@ void close_serv() {
   closesocket(listen_sock);
   closesocket(conn_sock);
   WSACleanup();
+}
+
+/**
+ * strcpy that returns pointer to null byte of concatenated strings.
+ */
+char *_strcpy(char *destination, const char *source) {
+  char s = *source;
+  while (s != 0) {
+    *(destination++) = s;
+    s = *(++source);
+  }
+  *(++destination) = 0;
+  return destination;
+}
+
+/**
+ * strcat that returns pointer to null byte of concatenated strings.
+ */
+char *_strcat(char *destination, const char *source) {
+  while (*destination != 0) {
+    ++destination;
+  }
+  return _strcpy(destination, source);
 }
