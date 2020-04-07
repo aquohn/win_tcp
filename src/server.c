@@ -15,7 +15,8 @@
 
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
-#define WT_QUIT(MSG, CODE) WT_INFO(MSG, CODE); closesocket(conn_sock); 
+#define WT_DISCONN(SOCK) fprintf(stderr, "Unable to send messages, shutting down socket\n"); shutdown(SOCK, SD_BOTH); closesocket(SOCK); break 
+#define WT_SENDERR(ERR, SOCK) if (err_resp(ERR)) { fprintf(stderr, "Error message sent\n"); continue; } else { WT_DISCONN(SOCK); }
 
 #define DEBUG 1
 
@@ -76,9 +77,10 @@ BOOL WINAPI int_handler(DWORD sig_type);
 FILE *locate(char *url, char *accept, int *errcode, const char **type);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
 bool parse_req(const char *req, struct reqinfo *info, int *errcode);
+bool err_resp(int errcode);
+char *write_date_hdr(char *buf);
 char *_strcat(char *destination, const char *source);
 char *_strcpy(char *destination, const char *source);
-char *write_date_hdr(char *buf);
 
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
 SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
@@ -134,10 +136,12 @@ int main(int argc, char** argv) {
     char recvbuf[DATA_BUFLEN + 1];
     char sendbuf[DATA_BUFLEN + 1];
 
+    // Receive from socket
     while (1) {
       recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
       if (recv_status == SOCKET_ERROR) {
-        WT_QUIT("Error receiving data!", WSAGetLastError());
+        WT_INFO("Error receiving data!", WSAGetLastError());
+        continue;
       } else if (recv_status == 0) {
         printf("Connection closed by client.\n");
         break;
@@ -148,15 +152,13 @@ int main(int argc, char** argv) {
 
       debug_print("Data received: %s\n", recvbuf);
 
-      // TODO send error codes to client instead of quitting
-
       struct reqinfo info;
       int errcode = 0;
       const char *type;
 
       // parse request header
       if (!parse_req(recvbuf, &info, &errcode)) {
-        WT_QUIT("Invalid request format!", errcode);
+        WT_SENDERR(errcode, conn_sock);
       }
 
       serv_file = locate(info.url, info.accept, &errcode, &type);
@@ -164,19 +166,19 @@ int main(int argc, char** argv) {
       fstat(fileno(serv_file), &file_status);
 
       if (serv_file == NULL) {
-        WT_QUIT("Error retrieving resource!", errcode);
+        WT_SENDERR(errcode, conn_sock);
       }
 
       // check last modified
       if (info.if_mod_since) {
         if (file_status.st_mtime <= info.if_mod_since_time) {
           fclose(serv_file);
-          WT_QUIT("Resource not required.", HTTP_NOT_MOD);
+          errcode = HTTP_NOT_MOD;
+          WT_SENDERR(errcode, conn_sock);
         }
       }
 
       debug_print("Resource retrieved.\n");
-
 
       // only implementing GET for this assignment, and all transfers are
       // automatically chunked
@@ -210,7 +212,8 @@ int main(int argc, char** argv) {
         append(sendbufcurr, "\r\n");
         send_status = send(conn_sock, sendbuf, strlen(sendbuf), 0); 
         if (send_status < 0) {
-          WT_QUIT("Failed to send data!", WSAGetLastError());
+          WT_INFO("Failed to send data!", WSAGetLastError());
+          WT_DISCONN(conn_sock);
         }
         debug_print("HTTP response header: %s\n", sendbuf);
 
@@ -231,7 +234,8 @@ int main(int argc, char** argv) {
             send_status = send(conn_sock, sendbuf, 
                 full_hexstr_len + full_chunk_size + 2, 0);
             if (send_status < 0) {
-              WT_QUIT("Failed to send data!", WSAGetLastError());
+              WT_INFO("Failed to send data!", WSAGetLastError());
+              WT_DISCONN(conn_sock);
             }
             //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
           }
@@ -247,7 +251,8 @@ int main(int argc, char** argv) {
         send_status = send(conn_sock, sendbuf, 
             last_hexstr_len + last_chunk_size + 2, 0);
         if (send_status < 0) {
-          WT_QUIT("Failed to send data!", WSAGetLastError());
+          WT_INFO("Failed to send data!", WSAGetLastError());
+          WT_DISCONN(conn_sock);
         }
         //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
 
@@ -255,7 +260,8 @@ int main(int argc, char** argv) {
         const char *chunk_end = "0\r\n\r\n";
         send_status = send(conn_sock, chunk_end, strlen(chunk_end), 0);
         if (send_status < 0) {
-          WT_QUIT("Failed to send data!", WSAGetLastError());
+          WT_INFO("Failed to send data!", WSAGetLastError());
+          WT_DISCONN(conn_sock);
         }
         //debug_print("Sent end of chunks: %s\n", chunk_end);
         fclose(serv_file);
@@ -448,7 +454,11 @@ BOOL WINAPI int_handler(DWORD sig_type) {
   return FALSE;
 }
 
-void err_resp(int errcode) {
+/**
+ * Send an error response to the client. Returns true if response was
+ * successfully sent, false otherwise.
+ */
+bool err_resp(int errcode) {
   char closebuf[DATA_BUFLEN] = "HTTP/1.1 ";
   char *bufptr = closebuf;
   char *errstr;
@@ -477,11 +487,14 @@ void err_resp(int errcode) {
       break;
   }
   bufptr = _strcat(closebuf, errstr);
+  append(bufptr, "\r\n");
   strcpy(write_date_hdr(bufptr), "\r\n");
   if (send(conn_sock, closebuf, strlen(closebuf), 0) < 0) {
     WT_INFO("Failed to send data!", WSAGetLastError());
-    closesocket(conn_sock);
+    return false;
   }
+  debug_print("Sending %s error to client...\n", errstr);
+  return true;
 }
 
 /**

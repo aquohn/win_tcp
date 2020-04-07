@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
   char *ok_query = "GET /c.txt HTTP/1.1\r\n"
     "Host: localhost\r\n"
     "Accept: text/plain\r\n"
-    "If-Modified-Since: Wed, 01 Jan 2020 16:00:00 GMT\r\n"
+    "If-Modified-Since: Wed, 01 Jan 2021 16:00:00 GMT\r\n"
     "Connection: close\r\n"
     "\r\n";
   if (send(sock, ok_query, strlen(ok_query), 0) < 0) {
