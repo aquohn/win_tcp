@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
   char *ok_query = "GET /c.txt HTTP/1.1\r\n"
     "Host: localhost\r\n"
     "Accept: text/plain\r\n"
-    "If-Modified-Since: Mon, 06 Apr 2020 16:00:00 GMT\r\n"
+    "If-Modified-Since: Wed, 01 Jan 2020 16:00:00 GMT\r\n"
     "\r\n";
   if (send(sock, ok_query, strlen(ok_query), 0) < 0) {
     status = WSAGetLastError();
@@ -130,8 +130,9 @@ int main(int argc, char** argv) {
       printf("Connection closed by server.\n");
       break;
     } 
-    
+
     printf("Receieved %d bytes\n", recv_status);
+    recvbuf[recv_status] = '\0';
     printf("Data received: %s\n\n", recvbuf);
 
     // TODO malloc a buffer and resize as data comes in

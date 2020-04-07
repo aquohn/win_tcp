@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <sys/stat.h>
+#include <assert.h>
 
 #define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
 #define WT_QUIT(MSG, CODE) close_serv(); WT_DIE(MSG, CODE)
@@ -28,14 +29,14 @@
 #define HEXSTR_MAXLEN 64
 #define BACKLOG 5
 
-// some Windows macro I'm not using
-#ifdef DELETE
-#undef DELETE
-#endif
 #define SRV "srv"
 #define SRV_LEN 3
 #define FILE_CNT 3
 
+// some Windows macro I'm not using
+#ifdef DELETE
+#undef DELETE
+#endif
 #define HTTP_BAD_REQ 400
 #define HTTP_NOT_FOUND 404
 #define HTTP_WRONG_MTD 404
@@ -123,11 +124,15 @@ int main(int argc, char** argv) {
     char cli_addr_str[ADDR_BUFLEN];
     inet_ntop(AF_INET, &cli_addr.sin_addr, cli_addr_str, ADDR_BUFLEN);
     printf("Connection from %s\n", cli_addr_str);
-    enum http_mtd req_mtd;
 
     // Read in data
     int recv_status = SOCKET_ERROR;
     char recvbuf[DATA_BUFLEN + 1];
+
+    struct reqinfo info;
+    int errcode = 0;
+    FILE *serv_file = NULL;
+
     while (1) {
       recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
       if (recv_status == SOCKET_ERROR) {
@@ -142,11 +147,6 @@ int main(int argc, char** argv) {
 
       debug_print("Data received: %s\n", recvbuf);
 
-      int errcode = 0;
-      struct reqinfo info;
-      FILE *serv_file = NULL;
-
-
       // TODO send error codes to client instead of quitting
 
       // parse request header
@@ -159,7 +159,6 @@ int main(int argc, char** argv) {
       // still NULL implies errcode
       if (serv_file == NULL) {
         WT_QUIT("Error retrieving resource!", errcode);
-        return NULL;
       }
 
       // check last modified
@@ -177,7 +176,7 @@ int main(int argc, char** argv) {
       // only implementing GET for this assignment
       // send in chunks
       // format is <chunk size in hex>\r\n<chunk>\r\n
-      if (req_mtd == GET) {
+      if (info.mtd == GET) {
 
         struct stat file_status;
         fstat(fileno(serv_file), &file_status);
@@ -188,49 +187,56 @@ int main(int argc, char** argv) {
         char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
         char *sendbufcurr, *sendbufend;
 
-        _strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
+        //_strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
 
-        char buflen_hexstr[HEXSTR_MAXLEN + 2 + 1];
-        sprintf(buflen_hexstr, "%X\r\n", DATA_BUFLEN);
-        size_t full_hexstr_len = strlen(buflen_hexstr);
-
-        int status;
+        char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
+        sprintf(chunklen_hexstr, "%X\r\n", DATA_BUFLEN);
+        size_t full_hexstr_len = strlen(chunklen_hexstr);
 
         debug_print("Writing out chunks...\n");
 
+        int send_status = SOCKET_ERROR;
+
         // write full chunks
         if (full_chunks > 0) {
-          sendbufcurr = _strcpy(sendbuf, buflen_hexstr);
+          sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
           size_t c;
           for (c = 0; c < full_chunks; ++c) {
-            sendbufend = sendbufcurr + fread(sendbuf + full_hexstr_len, 
-                DATA_BUFLEN, 1, serv_file);
+            sendbufend = sendbufcurr + fread(sendbufcurr, 
+                1, DATA_BUFLEN, serv_file);
             strcpy(sendbufend, "\r\n");
-            if (send(conn_sock, sendbuf, full_hexstr_len + DATA_BUFLEN + 2, 0) < 0) {
+            send_status = send(conn_sock, sendbuf, 
+                full_hexstr_len + DATA_BUFLEN + 2, 0);
+            if (send_status < 0) {
               WT_QUIT("Failed to send data!", WSAGetLastError());
             }
-            debug_print("Sent full chunk: %s\n", sendbuf);
+            debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
           }
         }
 
         // write last chunk
-        sprintf(buflen_hexstr, "%X\r\n", last_chunk_size);
-        size_t last_hexstr_len = strlen(buflen_hexstr);
-        sendbufcurr = _strcpy(sendbuf, buflen_hexstr);
-        sendbufend = sendbufcurr + fread(sendbufcurr, last_chunk_size, 
-            1, serv_file);
+        sprintf(chunklen_hexstr, "%X\r\n", last_chunk_size);
+        size_t last_hexstr_len = strlen(chunklen_hexstr);
+        sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
+        debug_print("After writing size str: %s", sendbuf);
+        sendbufend = sendbufcurr + fread(sendbufcurr, 1, last_chunk_size, 
+            serv_file);
+        debug_print("Last chunk: %s", sendbufcurr);
         strcpy(sendbufend, "\r\n");
-        if (send(conn_sock, sendbuf, last_hexstr_len + last_chunk_size + 2, 0) < 0) {
+        send_status = send(conn_sock, sendbuf, 
+            last_hexstr_len + last_chunk_size + 2, 0);
+        if (send_status < 0) {
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
-        debug_print("Sent last chunk: %s\n", sendbuf);
+        debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
 
         // signal end of chunks
         const char *chunk_end = "0\r\n\r\n";
-        if (send(conn_sock, chunk_end, strlen(chunk_end), 0) < 0) {
+        send_status = send(conn_sock, chunk_end, strlen(chunk_end), 0);
+        if (send_status < 0) {
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
-        debug_print("Sent end of chunk: %s\n", chunk_end);
+        debug_print("Sent end of chunks: %s\n", chunk_end);
 
         break;
       }
@@ -352,7 +358,7 @@ FILE *locate(char *url, char *accept, int *errcode) {
   int i;
   for (i = 0; i < FILE_CNT; ++i) {
     if (strcmp(url, filenames[i]) == 0) {
-      if (accept && (strcmp(accept, mime[i]) != 0)) {
+      if ((accept[0] != 0) && (strcmp(accept, mime[i]) != 0)) {
         *errcode = HTTP_NOT_ACC;
         return NULL;
       } else {
@@ -432,7 +438,7 @@ char *_strcpy(char *destination, const char *source) {
     *(destination++) = s;
     s = *(++source);
   }
-  *(++destination) = '\0';
+  *destination = '\0';
   return destination;
 }
 
@@ -444,4 +450,4 @@ char *_strcat(char *destination, const char *source) {
     ++destination;
   }
   return _strcpy(destination, source);
-}
+} 
