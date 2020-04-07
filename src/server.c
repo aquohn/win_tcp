@@ -48,8 +48,10 @@
 
 enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
   MTD_COUNT}; // for keeping track of number of methods
-char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
+const char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
   "OPTIONS", "TRACE", "PATCH"};
+const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
+const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
 
 /**
  * Struct representing data parsed from request header. Only contains supported
@@ -68,7 +70,7 @@ struct reqinfo {
 
 void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
-FILE *locate(char *url, char *accept, int *errcode);
+FILE *locate(char *url, char *accept, int *errcode, char **type);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
 bool parse_req(const char *req, struct reqinfo *info, int *errcode);
 char *_strcat(char *destination, const char *source);
@@ -129,10 +131,6 @@ int main(int argc, char** argv) {
     int recv_status = SOCKET_ERROR;
     char recvbuf[DATA_BUFLEN + 1];
 
-    struct reqinfo info;
-    int errcode = 0;
-    FILE *serv_file = NULL;
-
     while (1) {
       recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
       if (recv_status == SOCKET_ERROR) {
@@ -149,12 +147,19 @@ int main(int argc, char** argv) {
 
       // TODO send error codes to client instead of quitting
 
+      struct reqinfo info;
+      int errcode = 0;
+      FILE *serv_file = NULL;
+      char *type;
+
       // parse request header
       if (!parse_req(recvbuf, &info, &errcode)) {
         WT_QUIT("Invalid request format!", errcode);
       }
 
-      serv_file = locate(info.url, info.accept, &errcode);
+      serv_file = locate(info.url, info.accept, &errcode, &type);
+      struct stat file_status;
+      fstat(fileno(serv_file), &file_status);
 
       // still NULL implies errcode
       if (serv_file == NULL) {
@@ -163,9 +168,7 @@ int main(int argc, char** argv) {
 
       // check last modified
       if (info.if_mod_since) {
-        struct stat serv_file_status; 
-        fstat(fileno(serv_file), &serv_file_status);
-        if (serv_file_status.st_mtime <= info.if_mod_since_time) {
+        if (file_status.st_mtime <= info.if_mod_since_time) {
           fclose(serv_file);
           WT_QUIT("Resource not required.", HTTP_NOT_MOD);
         }
@@ -177,9 +180,6 @@ int main(int argc, char** argv) {
       // send in chunks
       // format is <chunk size in hex>\r\n<chunk>\r\n
       if (info.mtd == GET) {
-
-        struct stat file_status;
-        fstat(fileno(serv_file), &file_status);
         size_t full_chunks = file_status.st_size / DATA_BUFLEN;
         size_t last_chunk_size = file_status.st_size % DATA_BUFLEN;
 
@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
         char sendbuf[DATA_BUFLEN + HEXSTR_MAXLEN + 4 + 1];
         char *sendbufcurr, *sendbufend;
 
-        //_strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
+        sendbufcurr = _strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
 
         char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
         sprintf(chunklen_hexstr, "%X\r\n", DATA_BUFLEN);
@@ -237,7 +237,6 @@ int main(int argc, char** argv) {
           WT_QUIT("Failed to send data!", WSAGetLastError());
         }
         debug_print("Sent end of chunks: %s\n", chunk_end);
-
         break;
       }
     } 
@@ -347,12 +346,10 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
 }
 
 /**
- * Locates a resource, returning its file pointer.
+ * Locates a resource, returning its file pointer and MIME type.
  */
-FILE *locate(char *url, char *accept, int *errcode) {
+FILE *locate(char *url, char *accept, int *errcode, char **type) {
   debug_print("Finding file %s...\n", url);
-  const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
-  const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
   char path[FIELD_BUFLEN + SRV_LEN + 1] = SRV;
 
   int i;
@@ -362,8 +359,8 @@ FILE *locate(char *url, char *accept, int *errcode) {
         *errcode = HTTP_NOT_ACC;
         return NULL;
       } else {
+        *type = mime[i];
         strcpy(path + SRV_LEN, filenames[i]);
-        debug_print("Full path: %s\n", path);
         return fopen(path, "rb");
       }
     }
