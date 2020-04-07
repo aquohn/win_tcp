@@ -13,12 +13,14 @@
 #include <sys/stat.h>
 #include <assert.h>
 
-#define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
-#define WT_QUIT(MSG, CODE) close_serv(); WT_DIE(MSG, CODE)
+#define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
+#define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
+#define WT_QUIT(MSG, CODE) WT_INFO(MSG, CODE); closesocket(conn_sock); 
 
 #define DEBUG 1
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
+#define append(str1, str2) str1 = _strcpy(str1, str2)
 
 #define DEFAULT_PORT 33333
 #define DATA_BUFLEN 1024
@@ -39,12 +41,13 @@
 #endif
 #define HTTP_BAD_REQ 400
 #define HTTP_NOT_FOUND 404
-#define HTTP_WRONG_MTD 404
+#define HTTP_WRONG_MTD 405
 #define HTTP_NOT_ACC 406
 #define HTTP_TOO_LARGE 431
 #define HTTP_WRONG_VER 505
 #define HTTP_OK 200
 #define HTTP_NOT_MOD 304
+#define HTTP_TIME_LEN 29
 
 enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
   MTD_COUNT}; // for keeping track of number of methods
@@ -75,6 +78,7 @@ bool parse_timestamp(char *timestamp, struct tm *timestruct);
 bool parse_req(const char *req, struct reqinfo *info, int *errcode);
 char *_strcat(char *destination, const char *source);
 char *_strcpy(char *destination, const char *source);
+char *write_date_hdr(char *buf);
 
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
 SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
@@ -92,8 +96,7 @@ int main(int argc, char** argv) {
   // Create internet socket using reliable data connection, specifically using
   // TCP
   if ((listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-    status = WSAGetLastError();
-    WT_DIE("Failed to create listening socket!", status);
+    WT_DIE("Failed to create listening socket!", WSAGetLastError());
   }
 
   // Set up server address object
@@ -107,14 +110,12 @@ int main(int argc, char** argv) {
 
   // Bind socket to address
   if (bind(listen_sock, (struct sockaddr *) &serv_addr, sin_size) < 0) {
-    status = WSAGetLastError();
-    WT_DIE("Failed to bind listening socket!", status);
+    WT_DIE("Failed to bind listening socket!", WSAGetLastError());
   }
 
   // Start listening
   if (listen(listen_sock, BACKLOG) < 0) {
-    status = WSAGetLastError();
-    WT_DIE("Failed to start listening!", status);
+    WT_DIE("Failed to start listening!", WSAGetLastError());
   } 
 
   printf("Server listening on port %u!\n\n", DEFAULT_PORT);
@@ -176,6 +177,7 @@ int main(int argc, char** argv) {
 
       debug_print("Resource retrieved.\n");
 
+
       // only implementing GET for this assignment, and all transfers are
       // automatically chunked
       // format is <chunk size in hex>\r\n<chunk>\r\n
@@ -184,18 +186,39 @@ int main(int argc, char** argv) {
         size_t full_chunks = file_status.st_size / full_chunk_size;
         size_t last_chunk_size = file_status.st_size % full_chunk_size;
 
-        // TODO write response line
         char *sendbufcurr, *sendbufend;
+        int send_status = SOCKET_ERROR;
 
-        sendbufcurr = _strcpy(sendbuf, "HTTP/1.1 200 OK\r\n");
+        // response will have Date, Last-Modified, Connection,
+        // Transfer-Encoding and Content-Type
+        // NOTE: this code will result in buffer overflows if DATA_BUFLEN is set
+        // too low
+        sendbufcurr = write_date_hdr(_strcpy(sendbuf, "HTTP/1.1 200 OK\r\n"));
+        append(sendbufcurr, "Last-Modified: ");
+        struct tm tm = *gmtime(&file_status.st_mtime);
+        strftime(sendbufcurr, HTTP_TIME_LEN + 1, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+        sendbufcurr = _strcpy(sendbufcurr + HTTP_TIME_LEN, "\r\n");
+        if (info.keep_alive) {
+          append(sendbufcurr, "Connection: keep-alive\r\n");
+        } else {
+          append(sendbufcurr, "Connection: close\r\n");
+        }
+        append(sendbufcurr, "Content-Type: ");
+        append(sendbufcurr, type);
+        append(sendbufcurr, "\r\n");
+        append(sendbufcurr, "Transfer-Encoding: chunked\r\n");
+        append(sendbufcurr, "\r\n");
+        send_status = send(conn_sock, sendbuf, strlen(sendbuf), 0); 
+        if (send_status < 0) {
+          WT_QUIT("Failed to send data!", WSAGetLastError());
+        }
+        debug_print("HTTP response header: %s\n", sendbuf);
 
         char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
         sprintf(chunklen_hexstr, "%X\r\n", full_chunk_size);
         size_t full_hexstr_len = strlen(chunklen_hexstr);
 
         debug_print("Writing out chunks...\n");
-
-        int send_status = SOCKET_ERROR;
 
         // write full chunks
         if (full_chunks > 0) {
@@ -236,12 +259,15 @@ int main(int argc, char** argv) {
         }
         //debug_print("Sent end of chunks: %s\n", chunk_end);
         fclose(serv_file);
+      } else {
+        // HTTP_WRONG_MTD
       }
 
       if (!info.keep_alive) {
         shutdown(conn_sock, SD_BOTH);
         closesocket(conn_sock);
         printf("Connection completed and closed.\n");
+        break;
       }
     } 
   }
@@ -302,7 +328,7 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
   }
 
   // read header lines
-  // only supporting Accept and If-Modified-Since
+  // only supporting Accept, If-Modified-Since and Connection
   char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
 
   // initialise info structure
@@ -422,6 +448,42 @@ BOOL WINAPI int_handler(DWORD sig_type) {
   return FALSE;
 }
 
+void err_resp(int errcode) {
+  char closebuf[DATA_BUFLEN] = "HTTP/1.1 ";
+  char *bufptr = closebuf;
+  char *errstr;
+  switch(errcode) {
+    case HTTP_NOT_FOUND: 
+      errstr = "404 Not Found";
+      break;
+    case HTTP_WRONG_MTD: 
+      errstr = "405 Method Not Allowed";
+      break;
+    case HTTP_NOT_ACC: 
+      errstr = "406 Not Acceptable";
+      break;
+    case HTTP_TOO_LARGE: 
+      errstr = "413 Payload Too Large";
+      break;
+    case HTTP_WRONG_VER: 
+      errstr = "505 HTTP Version Not Supported";
+      break;
+    case HTTP_NOT_MOD: 
+      errstr = "304 Not Modified";
+      break;
+    case HTTP_BAD_REQ:
+    default:
+      errstr = "400 Bad Request";
+      break;
+  }
+  bufptr = _strcat(closebuf, errstr);
+  strcpy(write_date_hdr(bufptr), "\r\n");
+  if (send(conn_sock, closebuf, strlen(closebuf), 0) < 0) {
+    WT_INFO("Failed to send data!", WSAGetLastError());
+    closesocket(conn_sock);
+  }
+}
+
 /**
  * Close down server connections and clean up.
  */
@@ -435,6 +497,18 @@ void close_serv() {
   closesocket(listen_sock);
   closesocket(conn_sock);
   WSACleanup();
+}
+
+/**
+ * Writes the Date header to the position pointed to by buf. buf must have at
+ * least 46 bytes of free space in it.
+ */
+char *write_date_hdr(char *buf) {
+  buf = _strcpy(buf, "Date: ");
+  time_t now = time(0);
+  struct tm tm = *gmtime(&now);
+  strftime(buf, HTTP_TIME_LEN + 1, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+  return _strcpy(buf + HTTP_TIME_LEN, "\r\n");
 }
 
 /**
