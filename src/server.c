@@ -24,7 +24,7 @@
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
 #define WT_DISCONN(SOCK) shutdown(SOCK, SD_BOTH); closesocket(SOCK); break 
-#define WT_SENDERR(ERR, SOCK) if (err_resp(ERR)) { continue; } else { WT_DISCONN(SOCK); }
+#define WT_SENDERR(ERR, SOCK) if (send_err_resp(ERR)) { continue; } else { WT_DISCONN(SOCK); }
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
 #define append(str1, str2) str1 = _strcpy(str1, str2)
@@ -78,13 +78,17 @@ struct reqinfo {
   char *data;
 };
 
-void close_serv();
 BOOL WINAPI int_handler(DWORD sig_type);
+void close_serv();
 FILE *locate(char *url, char *accept, int *errcode, const char **type);
 bool parse_timestamp(char *timestamp, struct tm *timestruct);
 bool parse_req(const char *req, struct reqinfo *info, int *errcode);
-bool err_resp(int errcode);
+bool send_err_resp(int errcode);
 char *write_date_hdr(char *buf);
+void write_ok_resp(char *resp, struct reqinfo *info, struct stat *file_status,
+    const char *type);
+bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
+    char *resp);
 char *_strcat(char *destination, const char *source);
 char *_strcpy(char *destination, const char *source);
 
@@ -173,7 +177,7 @@ int main(int argc, char** argv) {
 
       if (serv_file == NULL) {
         if (!info.keep_alive) {
-          err_resp(errcode);
+          send_err_resp(errcode);
           WT_DISCONN(conn_sock);
         } else {
           WT_SENDERR(errcode, conn_sock);
@@ -186,7 +190,7 @@ int main(int argc, char** argv) {
           fclose(serv_file);
           errcode = HTTP_NOT_MOD;
           if (!info.keep_alive) {
-            err_resp(errcode);
+            send_err_resp(errcode);
             WT_DISCONN(conn_sock);
           } else {
             WT_SENDERR(errcode, conn_sock);
@@ -196,95 +200,26 @@ int main(int argc, char** argv) {
 
       debug_print("Resource retrieved.\n");
 
+      char resp[DATA_BUFLEN]; 
+      write_ok_resp(resp, &info, &file_status, type);
+
       // only implementing GET for this assignment, and all transfers are
       // automatically chunked
       // format is <chunk size in hex>\r\n<chunk>\r\n
       if (info.mtd == GET) {
-        size_t full_chunk_size = DATA_BUFLEN - HEXSTR_MAXLEN - 4;
-        size_t full_chunks = file_status.st_size / full_chunk_size;
-        size_t last_chunk_size = file_status.st_size % full_chunk_size;
-
-        char *sendbufcurr, *sendbufend;
-        int send_status = SOCKET_ERROR;
-
-        // response will have Date, Last-Modified, Connection,
-        // Transfer-Encoding and Content-Type
-        // NOTE: this code will result in buffer overflows if DATA_BUFLEN is set
-        // too low
-        sendbufcurr = write_date_hdr(_strcpy(sendbuf, "HTTP/1.1 200 OK\r\n"));
-        append(sendbufcurr, "Last-Modified: ");
-        struct tm tm = *gmtime(&file_status.st_mtime);
-        strftime(sendbufcurr, HTTP_TIME_LEN + 1, "%a, %d %b %Y %H:%M:%S GMT", &tm);
-        sendbufcurr = _strcpy(sendbufcurr + HTTP_TIME_LEN, "\r\n");
-        if (info.keep_alive) {
-          append(sendbufcurr, "Connection: keep-alive\r\n");
-        } else {
-          append(sendbufcurr, "Connection: close\r\n");
-        }
-        append(sendbufcurr, "Content-Type: ");
-        append(sendbufcurr, type);
-        append(sendbufcurr, "\r\n");
-        append(sendbufcurr, "Transfer-Encoding: chunked\r\n");
-        append(sendbufcurr, "\r\n");
-        send_status = send(conn_sock, sendbuf, strlen(sendbuf), 0); 
-        if (send_status < 0) {
-          WT_INFO("Failed to send data!", WSAGetLastError());
+        if (!handle_get(sendbuf, &info, &file_status, resp)) {
+          fclose(serv_file);
+          WT_INFO("Failed to send while handling GET!", WSAGetLastError());
           WT_DISCONN(conn_sock);
         }
-        debug_print("HTTP response header: %s\n", sendbuf);
-
-        char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
-        sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", full_chunk_size);
-        size_t full_hexstr_len = strlen(chunklen_hexstr);
-
-        debug_print("Writing out chunks...\n");
-
-        // write full chunks
-        if (full_chunks > 0) {
-          sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
-          size_t c;
-          for (c = 0; c < full_chunks; ++c) {
-            sendbufend = sendbufcurr + fread(sendbufcurr, 
-                1, full_chunk_size, serv_file);
-            strcpy(sendbufend, "\r\n");
-            send_status = send(conn_sock, sendbuf, 
-                full_hexstr_len + full_chunk_size + 2, 0);
-            if (send_status < 0) {
-              WT_INFO("Failed to send data!", WSAGetLastError());
-              WT_DISCONN(conn_sock);
-            }
-            //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
-          }
-        }
-
-        // write last chunk
-        sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", last_chunk_size);
-        size_t last_hexstr_len = strlen(chunklen_hexstr);
-        sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
-        sendbufend = sendbufcurr + fread(sendbufcurr, 1, last_chunk_size, 
-            serv_file);
-        strcpy(sendbufend, "\r\n");
-        send_status = send(conn_sock, sendbuf, 
-            last_hexstr_len + last_chunk_size + 2, 0);
-        if (send_status < 0) {
-          WT_INFO("Failed to send data!", WSAGetLastError());
-          WT_DISCONN(conn_sock);
-        }
-        //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
-
-        // signal end of chunks
-        const char *chunk_end = "0\r\n\r\n";
-        send_status = send(conn_sock, chunk_end, strlen(chunk_end), 0);
-        if (send_status < 0) {
-          WT_INFO("Failed to send data!", WSAGetLastError());
-          WT_DISCONN(conn_sock);
-        }
-        //debug_print("Sent end of chunks: %s\n", chunk_end);
-        fclose(serv_file);
       } else {
+        fclose(serv_file);
         errcode = HTTP_WRONG_MTD;
         WT_SENDERR(errcode, conn_sock);
       }
+
+
+      fclose(serv_file);
 
       if (!info.keep_alive) {
         printf("Connection completed and closed.\n");
@@ -401,6 +336,100 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
 }
 
 /**
+ * Handles a GET request.
+ */
+bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
+    char *resp) {
+  size_t full_chunk_size = DATA_BUFLEN - HEXSTR_MAXLEN - 4;
+  size_t full_chunks = file_status->st_size / full_chunk_size;
+  size_t last_chunk_size = file_status->st_size % full_chunk_size;
+
+  char *sendbufcurr, *sendbufend;
+  int send_status = SOCKET_ERROR;
+
+  // response will have Date, Last-Modified, Connection,
+  // Transfer-Encoding and Content-Type
+  // NOTE: this code will result in buffer overflows if DATA_BUFLEN is set
+  // too low
+
+  append(resp, "Transfer-Encoding: chunked\r\n");
+  append(resp, "\r\n");
+  send_status = send(conn_sock, resp, strlen(resp), 0); 
+  if (send_status < 0) {
+    return false;
+  }
+  debug_print("HTTP response header: %s\n", resp);
+
+  char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
+  sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", full_chunk_size);
+  size_t full_hexstr_len = strlen(chunklen_hexstr);
+
+  debug_print("Writing out chunks...\n");
+
+  // write full chunks
+  if (full_chunks > 0) {
+    sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
+    size_t c;
+    for (c = 0; c < full_chunks; ++c) {
+      sendbufend = sendbufcurr + fread(sendbufcurr, 
+          1, full_chunk_size, serv_file);
+      strcpy(sendbufend, "\r\n");
+      send_status = send(conn_sock, sendbuf, 
+          full_hexstr_len + full_chunk_size + 2, 0);
+      if (send_status < 0) {
+        return false;
+      }
+      //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
+    }
+  }
+
+  // write last chunk
+  sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", last_chunk_size);
+  size_t last_hexstr_len = strlen(chunklen_hexstr);
+  sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
+  sendbufend = sendbufcurr + fread(sendbufcurr, 1, last_chunk_size, 
+      serv_file);
+  strcpy(sendbufend, "\r\n");
+  send_status = send(conn_sock, sendbuf, 
+      last_hexstr_len + last_chunk_size + 2, 0);
+  if (send_status < 0) {
+    return false;
+  }
+  //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
+
+  // signal end of chunks
+  const char *chunk_end = "0\r\n\r\n";
+  send_status = send(conn_sock, chunk_end, strlen(chunk_end), 0);
+  if (send_status < 0) {
+    return false;
+  }
+  //debug_print("Sent end of chunks: %s\n", chunk_end);
+
+  return true;
+}
+
+/**
+ * Create a generic OK response usable for any method. Note that this function
+ * may overflow the resp buffer if DATA_BUFLEN is too small.
+ */
+void write_ok_resp(char *resp, struct reqinfo *info, struct stat *file_status, 
+    const char *type) {
+  resp = write_date_hdr(_strcpy(resp, "HTTP/1.1 200 OK\r\n"));
+  append(resp, "Last-Modified: ");
+  struct tm tm = *gmtime(&file_status->st_mtime);
+  strftime(resp, HTTP_TIME_LEN + 1, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+  resp = _strcpy(resp + HTTP_TIME_LEN, "\r\n");
+  if (info->keep_alive) {
+    append(resp, "Connection: keep-alive\r\n");
+  } else {
+    append(resp, "Connection: close\r\n");
+  }
+  append(resp, "Content-Type: ");
+  append(resp, type);
+  append(resp, "\r\n");
+}
+
+/**
  * Locates a resource, returning its file pointer and MIME type.
  */
 FILE *locate(char *url, char *accept, int *errcode, const char **type) {
@@ -473,7 +502,7 @@ BOOL WINAPI int_handler(DWORD sig_type) {
  * Send an error response to the client. Returns true if response was
  * successfully sent, false otherwise.
  */
-bool err_resp(int errcode) {
+bool send_err_resp(int errcode) {
   char closebuf[DATA_BUFLEN] = "HTTP/1.1 ";
   char *bufptr = closebuf;
   char *errstr;
