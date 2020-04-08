@@ -45,7 +45,7 @@
 
 #define HTTP_BAD_REQ 400
 #define HTTP_NOT_FOUND 404
-#define HTTP_WRONG_MTD 404
+#define HTTP_WRONG_MTD 405
 #define HTTP_NOT_ACC 406
 #define HTTP_TOO_LARGE 431
 #define HTTP_WRONG_VER 505
@@ -95,6 +95,16 @@ int main(int argc, char** argv) {
   }
   SetConsoleCtrlHandler(int_handler, TRUE); // install Ctrl-C handler
 
+  time_t mod_since = 1;
+
+  if (argc == 2) {
+    if (strcmp(argv[1], "now") == 0) {
+      mod_since = time(0);
+    } else {
+      mod_since = strtol(argv[1], NULL, 10);
+    }
+  }
+
   // Specify the server to connect to
   char serv_ip_addr[ADDR_BUFLEN] = SERV_IP_ADDR;
 
@@ -115,12 +125,11 @@ int main(int argc, char** argv) {
   info.mtd = GET;
   info.data = NULL;
   info.keep_alive = false;
-  // TODO allow user input to change these settings
   info.if_mod_since = true;
-  info.if_mod_since_time = 1; // beginning of time
+  info.if_mod_since_time = mod_since;
 
   for (int i = 0; i < FILE_CNT; ++i) {
-
+    printf("\n");
     if (DEBUG && i != 2) {
       continue;
     }
@@ -148,8 +157,7 @@ int main(int argc, char** argv) {
     }
     reqlen = write_get_req(reqbuf, &info);
 
-    printf("Requesting %s...\n", info.url);
-    debug_print("Sending request:\n%s\n", reqbuf);
+    printf("Sending request:\n%s\n", reqbuf);
 
     // request file
     if (send(sock, reqbuf, reqlen, 0) < 0) {
@@ -207,7 +215,7 @@ int main(int argc, char** argv) {
                 case STATE_SIZE_R:
                   if (curr != '\n') {
                   } else if (*chunkbuf == '0' && *(chunkbuf + 1) == '\r') {
-                    printf("All chunks read, closing file.\n\n");
+                    printf("All chunks read, closing file.\n");
                     goto closedown;
                   } else {
                     chunklen = strtoull(chunkbuf, NULL, 16);     
@@ -284,7 +292,7 @@ bool parse_resp(char *resp, char *res_type, bool *is_chunked) {
   }
 
   if (respcode != HTTP_OK) {
-    fprintf(stderr, "File not downloaded: %d %s\n", respcode, msgbuf);
+    printf("File not downloaded: %d %s\n", respcode, msgbuf);
     return false;
   }
 
