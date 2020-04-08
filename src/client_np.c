@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[1], "now") == 0) {
       mod_since = time(0);
     } else {
-      mod_since = strtol(argv[1], NULL, 10);
+      mod_since = strtoull(argv[1], NULL, 10);
     }
   }
 
@@ -337,7 +337,13 @@ FILE *setup_get_resource(struct reqinfo *info) {
   static char buf[FIELD_BUFLEN] = USR;
   char *bufptr = buf + strlen(USR);
   strcpy(bufptr, info->url);
-  return fopen(buf, "wb");
+  FILE *temp = fopen(buf, "r+b");
+  if (temp != NULL) {
+    return temp;
+  } else {
+    fclose(temp);
+    return fopen(buf, "wb");
+  }
 }
 
 size_t write_get_req(char *req, struct reqinfo *info) {
