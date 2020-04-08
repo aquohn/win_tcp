@@ -2,20 +2,29 @@
 
 #define WIN32_MEAN_AND_LEAN
 
+#ifdef _WIN32
+#define LL_FMT "I64"
+#else
+#define LL_FMT "ll"
+#endif
+
 #include <winsock2.h> // MUST BE INCLUDED BEFORE STDIO
 #include <ws2tcpip.h>
 #include <stdio.h> 
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include <time.h>
 
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_cli(); exit(1)
+#define WT_BADCHUNK() fprintf(stderr, "Invalid chunking format!\n"); goto closedown
 
 #define DEBUG 1
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
+#define append(str1, str2) str1 = _strcpy(str1, str2)
 
 #define SERV_IP_ADDR "127.0.0.1"
 #define DEFAULT_PORT 33333
@@ -48,6 +57,7 @@ enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
   MTD_COUNT}; // for keeping track of number of methods
 const char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
   "OPTIONS", "TRACE", "PATCH"};
+enum chunk_state {STATE_SIZE, STATE_SIZE_R, STATE_DATA, STATE_DATA_R}; 
 const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
 const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
 
@@ -85,12 +95,6 @@ int main(int argc, char** argv) {
   }
   SetConsoleCtrlHandler(int_handler, TRUE); // install Ctrl-C handler
 
-  // Create internet socket using reliable data connection, specifically using
-  // TCP
-  if ((sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-    WT_DIE("Failed to create socket!", WSAGetLastError());
-  }
-
   // Specify the server to connect to
   char serv_ip_addr[ADDR_BUFLEN] = SERV_IP_ADDR;
 
@@ -101,11 +105,6 @@ int main(int argc, char** argv) {
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_port = htons(DEFAULT_PORT);
   inet_pton(AF_INET, serv_ip_addr, &serv_addr.sin_addr);
-
-  // Connect
-  if (connect(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-    WT_DIE("Failed to connect to server!", WSAGetLastError());
-  }
 
   // setup common request features
   struct reqinfo info;
@@ -118,19 +117,38 @@ int main(int argc, char** argv) {
   // TODO allow user input to change these settings
   info.keep_alive = true;
   info.if_mod_since = true;
-  time_t if_mod_since_time = 1; // beginning of time
+  info.if_mod_since_time = 1; // beginning of time
 
   for (int i = 0; i < FILE_CNT; ++i) {
+
+    if (DEBUG && i != 2) {
+      continue;
+    }
+
+    // Create internet socket using reliable data connection, specifically using
+    // TCP
+    if ((sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
+      WT_INFO("Failed to create socket!", WSAGetLastError());
+      continue;
+    }
+
+    // Connect
+    if (connect(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+      WT_INFO("Failed to connect to server!", WSAGetLastError());
+      continue;
+    }
 
     // generate file request
     strcpy(info.url, filenames[i]);
     strcpy(info.accept, mime[i]);
     recv_file = setup_get_resource(&info);
     if (!recv_file) {
-      fprintf(stderr, "Failed to open %s for writing!", info.url);
+      fprintf(stderr, "Failed to open %s for writing!\n", info.url);
       continue;
     }
     reqlen = write_get_req(reqbuf, &info);
+
+    debug_print("Sending request: %s\n", reqbuf);
 
     // request file
     if (send(sock, reqbuf, reqlen, 0) < 0) {
@@ -144,49 +162,89 @@ int main(int argc, char** argv) {
     char recvbuf[DATA_BUFLEN + 1];
     bool is_chunked = false;
     bool is_hdr_read = false;
-    char *recvbufcurr;
-    char *res_name, *res_type;
-    char *filebuf = NULL, *filebufcurr = NULL;
-    size_t filebuflen, filebufcurrlen = 0;
+    char *recvcurr = NULL, *recvend = NULL;
+    char chunkbuf[FIELD_BUFLEN + 1];
+    char *chunkbufcurr = chunkbuf;
+    size_t chunklen = 0;
+    enum chunk_state state = STATE_SIZE;
 
     while (1) {
       recv_status = recv(sock, recvbuf, DATA_BUFLEN, 0);
       if (recv_status == SOCKET_ERROR) {
-        WT_DIE("Error receiving data!", WSAGetLastError());
+        WT_INFO("Error receiving data!", WSAGetLastError());
+        break;
       } else if (recv_status == 0) {
         printf("Connection closed by server.\n");
         break;
       } 
 
       printf("Receieved %d bytes\n", recv_status);
-      recvbuf[recv_status] = '\0';
+      recvcurr = recvbuf;
+      recvend = recvbuf + recv_status;
+      *recvend = '\0';
 
       if (!is_hdr_read) {
-        is_hdr_read = parse_resp(recvbuf, res_type, &is_chunked);
+        is_hdr_read = parse_resp(recvbuf, info.accept, &is_chunked);
         if (!is_hdr_read) { // error while reading
           break;
         }
       } else {
         if (is_chunked) {
-          if (!filebuf) {
-            filebuf = malloc(2 * DATA_BUFLEN);
-            if (!filebuf) {
-              fprintf(stderr, "Unable to allocate memory for data!");
+          while (recvcurr < recvend) {
+            char curr = *(recvcurr++);
+            if (chunklen == 0) {
+              switch (state) {
+                case STATE_SIZE: 
+                  if (curr == '\r') {
+                    *(chunkbufcurr++) = curr;
+                    state = STATE_SIZE_R;
+                  } else if (!isxdigit(curr)) {
+                    WT_BADCHUNK();
+                  } else {
+                    *(chunkbufcurr++) = curr;
+                  }
+                  break;
+                case STATE_SIZE_R:
+                  if (curr != '\n') {
+                  } else if (*chunkbuf == '0' && *(chunkbuf + 1) == '\r') {
+                    printf("All chunks read, closing file.\n");
+                    goto closedown;
+                  } else {
+                    chunklen = strtoull(chunkbuf, NULL, 16);     
+                    if (chunklen == 0) {
+                      WT_BADCHUNK();
+                    }
+                  }
+                  chunkbufcurr = chunkbuf;
+                  state = STATE_DATA;
+                  break;
+                case STATE_DATA: 
+                  if (curr == '\r') {
+                    state = STATE_DATA_R;
+                  } else {
+                    WT_BADCHUNK();
+                  }
+                  break;
+                case STATE_DATA_R: 
+                  if (curr == '\n') {
+                    state = STATE_SIZE;
+                  } else {
+                    WT_BADCHUNK();
+                  }
+                  break;
+              }
+            } else {
+              fputc(curr, recv_file);
+              --chunklen;
             }
-            filebufcurr = filebuf;
-            filebuflen = 2 * DATA_BUFLEN;
           }
-          filebufcurrlen += recv_status;
-          if (filebufcurrlen >= filebuflen) {
-            filebuflen = filebufcurrlen * 2;
-            filebuf = realloc(filebuf, filebuflen);
-            filebufcurr = filebuf + filebufcurrlen - recv_status;
-          }
-          memcpy(filebufcurr, recvbuf, recv_status);
-          filebufcurr += recv_status;
         }
       }
     }
+
+closedown: fclose(recv_file);
+           shutdown(sock, SD_BOTH);
+           closesocket(sock);
   }
 
   close_cli();
@@ -258,7 +316,7 @@ bool parse_resp(char *resp, char *res_type, bool *is_chunked) {
         return false;
       }
     } else if (strcmp(hdrbuf, "transfer-encoding") == 0) {
-      if (strcmp(valbuf, "chunked") != 0) {
+      if (strcmp(valbuf, "chunked") == 0) {
         *is_chunked = true;
       }
     }
@@ -287,12 +345,16 @@ size_t write_get_req(char *req, struct reqinfo *info) {
   struct tm tm = *gmtime(&info->if_mod_since_time);
   strftime(timestamp, HTTP_TIME_LEN + 1, "%a, %d %b %Y %H:%M:%S GMT", &tm);
 
-  int reqlen;
-  sprintf(req, "GET %s HTTP/1.1\r\n"
+  reqcurr = _strcpy(req, "GET ");
+  append(reqcurr, info->url);
+  append(reqcurr, " HTTP/1.1\r\n"
       "Host: localhost\r\n"
-      "Accept: %s\r\n"
-      "Connection: %s\r\n%n", info->url, info->accept, conntype, &reqlen);
-  reqcurr = req + reqlen;
+      "Accept: ");
+  append(reqcurr, info->accept);
+  append(reqcurr, "\r\n"
+      "Connection: ");
+  append(reqcurr, conntype);
+  append(reqcurr, "\r\n");
 
   if (info->if_mod_since) {
     append(reqcurr, "If-Modified-Since: ");

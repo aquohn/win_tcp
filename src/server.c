@@ -152,7 +152,8 @@ int main(int argc, char** argv) {
       recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
       if (recv_status == SOCKET_ERROR) {
         WT_INFO("Error receiving data!", WSAGetLastError());
-        continue;
+        // TODO: differentiate between different errors
+        break;
       } else if (recv_status == 0) {
         printf("Connection closed by client.\n");
         break;
@@ -274,14 +275,14 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
   }
   if (i == (int) MTD_COUNT) {
     *errcode = HTTP_WRONG_MTD;
-    return NULL;
+    return false;
   }
 
   // check HTTP version
   // only supporting HTTP/1.1
   if (strcmp(verbuf, "HTTP/1.1") != 0) {
     *errcode = HTTP_WRONG_VER;
-    return NULL;
+    return false;
   }
 
   // read header lines
@@ -297,7 +298,7 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
           "[^\r\n] \r\n%n", hdrbuf, valbuf, &linelen) != 2) {
       debug_print("Invalid header line: %s\n", req);
       *errcode = HTTP_BAD_REQ;
-      return NULL;
+      return false;
     }
     req += linelen;
     debug_print("Processing %s...\n", hdrbuf);
