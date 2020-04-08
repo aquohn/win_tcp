@@ -19,7 +19,7 @@
 #include <sys/stat.h>
 #include <assert.h>
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
@@ -173,6 +173,8 @@ int main(int argc, char** argv) {
         WT_SENDERR(errcode, conn_sock);
       }
 
+      printf("Received HTTP request:\n%s\n", recvbuf);
+
       serv_file = locate(info.url, info.accept, &errcode, &type);
       struct stat file_status;
       fstat(fileno(serv_file), &file_status);
@@ -223,7 +225,7 @@ int main(int argc, char** argv) {
       fclose(serv_file);
 
       if (!info.keep_alive) {
-        printf("Connection completed and closed.\n");
+        printf("Connection completed and closed.\n\n");
         WT_DISCONN(conn_sock);
       }
     } 
@@ -365,7 +367,7 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
   if (send_status < 0) {
     return false;
   }
-  printf("HTTP response header:\n%s\n", resp);
+  debug_print("Sending response:\n%s\n", resp);
 
   char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
   sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", full_chunk_size);

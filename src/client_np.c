@@ -21,7 +21,7 @@
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_cli(); exit(1)
 #define WT_BADCHUNK() fprintf(stderr, "Invalid chunking format!\n"); goto closedown
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
 #define append(str1, str2) str1 = _strcpy(str1, str2)
@@ -114,8 +114,8 @@ int main(int argc, char** argv) {
 
   info.mtd = GET;
   info.data = NULL;
+  info.keep_alive = false;
   // TODO allow user input to change these settings
-  info.keep_alive = true;
   info.if_mod_since = true;
   info.if_mod_since_time = 1; // beginning of time
 
@@ -148,7 +148,8 @@ int main(int argc, char** argv) {
     }
     reqlen = write_get_req(reqbuf, &info);
 
-    debug_print("Sending request: %s\n", reqbuf);
+    printf("Requesting %s...\n", info.url);
+    debug_print("Sending request:\n%s\n", reqbuf);
 
     // request file
     if (send(sock, reqbuf, reqlen, 0) < 0) {
@@ -178,7 +179,6 @@ int main(int argc, char** argv) {
         break;
       } 
 
-      printf("Receieved %d bytes\n", recv_status);
       recvcurr = recvbuf;
       recvend = recvbuf + recv_status;
       *recvend = '\0';
@@ -207,7 +207,7 @@ int main(int argc, char** argv) {
                 case STATE_SIZE_R:
                   if (curr != '\n') {
                   } else if (*chunkbuf == '0' && *(chunkbuf + 1) == '\r') {
-                    printf("All chunks read, closing file.\n");
+                    printf("All chunks read, closing file.\n\n");
                     goto closedown;
                   } else {
                     chunklen = strtoull(chunkbuf, NULL, 16);     
