@@ -327,7 +327,7 @@ bool parse_resp(char *resp, char *res_type, bool *is_chunked) {
 
 FILE *setup_get_resource(struct reqinfo *info) {
   static char buf[FIELD_BUFLEN] = USR;
-  static char *bufptr = buf + strlen(USR);
+  char *bufptr = buf + strlen(USR);
   strcpy(bufptr, info->url);
   return fopen(buf, "wb");
 }

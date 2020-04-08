@@ -21,7 +21,7 @@
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_cli(); exit(1)
 #define WT_BADCHUNK() fprintf(stderr, "Invalid chunking format!\n"); goto closedown
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
 #define append(str1, str2) str1 = _strcpy(str1, str2)
@@ -86,7 +86,6 @@ char *_strcpy(char *destination, const char *source);
 
 SOCKET sock = INVALID_SOCKET; // for receiving connections
 
-
 int main(int argc, char** argv) {
   WSADATA wsa;
   // start version 2.2 of winsock
@@ -132,7 +131,6 @@ int main(int argc, char** argv) {
   info.if_mod_since_time = 1; // beginning of time
 
   for (int i = 0; i < FILE_CNT; ++i) {
-
     if (DEBUG && i != 2) {
       continue;
     }
@@ -324,7 +322,7 @@ bool parse_resp(char *resp, char *res_type, bool *is_chunked) {
 
 FILE *setup_get_resource(struct reqinfo *info) {
   static char buf[FIELD_BUFLEN] = USR;
-  static char *bufptr = buf + strlen(USR);
+  char *bufptr = buf + strlen(USR);
   strcpy(bufptr, info->url);
   return fopen(buf, "wb");
 }
