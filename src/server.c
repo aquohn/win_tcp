@@ -78,20 +78,20 @@ struct reqinfo {
   char *data;
 };
 
-BOOL WINAPI int_handler(DWORD sig_type);
-void close_serv();
-FILE *locate(char *url, char *accept, int *errcode, const char **type);
-bool parse_timestamp(char *timestamp, struct tm *timestruct);
-bool parse_req(const char *req, struct reqinfo *info, int *errcode);
+bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
+    char *resp);
 bool send_err_resp(int errcode);
-int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, size_t hexstrlen);
+int send_chunk(char *sendptr, char *chunkptr, size_t chunklen);
+FILE *locate(char *url, char *accept, int *errcode, const char **type);
 char *write_date_hdr(char *buf);
 void write_ok_resp(char *resp, struct reqinfo *info, struct stat *file_status,
     const char *type);
-bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
-    char *resp);
+bool parse_timestamp(char *timestamp, struct tm *timestruct);
+bool parse_req(const char *req, struct reqinfo *info, int *errcode);
 char *_strcat(char *destination, const char *source);
 char *_strcpy(char *destination, const char *source);
+BOOL WINAPI int_handler(DWORD sig_type);
+void close_serv();
 
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
 SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
@@ -219,7 +219,6 @@ int main(int argc, char** argv) {
         WT_SENDERR(errcode, conn_sock);
       }
 
-
       fclose(serv_file);
 
       if (!info.keep_alive) {
@@ -239,6 +238,7 @@ int main(int argc, char** argv) {
  * request.
  * @param[out] errcode Pointer to the error code to set on encountering an
  * error.
+ * @return True if request successfully parsed, false otherwise.
  */
 bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
 
@@ -337,7 +337,16 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
 }
 
 /**
- * Handles a GET request.
+ * Handles a GET request, sending the requested file in chunks.
+ *
+ * @param[out] sendbuf A pointer to a buffer to use to store information to
+ * send.
+ * @param[in] info A pointer to a reqinfo struct holding the information from
+ * parsing the request.
+ * @param[in] file_status A pointer to a stat struct holding the information
+ * about the resource to GET.
+ * @param[in] resp A pointer to a buffer holding the default response.
+ * @return True if resource was transmitted with no errors, false otherwise.
  */
 bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
     char *resp) {
@@ -349,18 +358,16 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
   int send_status = SOCKET_ERROR;
 
   // Add Transfer-Encoding to response and send 
-
-  append(resp, "Transfer-Encoding: chunked\r\n");
-  append(resp, "\r\n");
-  send_status = send(conn_sock, resp, strlen(resp), 0); 
+  char *respcurr = _strcat(resp, "Transfer-Encoding: chunked\r\n");
+  append(respcurr, "\r\n");
+  send_status = send(conn_sock, resp, respcurr - resp, 0); 
   if (send_status < 0) {
     return false;
   }
-  debug_print("HTTP response header: %s\n", resp);
+  printf("HTTP response header:\n%s\n", resp);
 
   char chunklen_hexstr[HEXSTR_MAXLEN + 2 + 1];
   sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", full_chunk_size);
-  size_t full_hexstr_len = strlen(chunklen_hexstr);
 
   debug_print("Writing out chunks...\n");
 
@@ -370,7 +377,7 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
     size_t c;
     for (c = 0; c < full_chunks; ++c) {
 
-      if (send_chunk(sendbuf, sendbufcurr, full_chunk_size, full_hexstr_len) < 0) {
+      if (send_chunk(sendbuf, sendbufcurr, full_chunk_size) < 0) {
         return false;
       }
       //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
@@ -379,9 +386,8 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
 
   // write last chunk
   sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", last_chunk_size);
-  size_t last_hexstr_len = strlen(chunklen_hexstr);
   sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
-  if (send_chunk(sendbuf, sendbufcurr, last_chunk_size, last_hexstr_len) < 0) {
+  if (send_chunk(sendbuf, sendbufcurr, last_chunk_size) < 0) {
     return false;
   }
   //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
@@ -400,10 +406,10 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
 /**
  * Sends a chunk of data.
  */
-int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, size_t hexstrlen) {
+int send_chunk(char *sendptr, char *chunkptr, size_t chunklen) {
   char *endptr = chunkptr + fread(chunkptr, 1, chunklen, serv_file);
-  strcpy(endptr, "\r\n");
-  return send(conn_sock, sendptr, chunklen + hexstrlen + 2, 0);
+  append(endptr, "\r\n");
+  return send(conn_sock, sendptr, endptr - sendptr, 0);
 }
 
 /**

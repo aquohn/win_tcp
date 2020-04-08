@@ -1,3 +1,5 @@
+// compile with -lws2_32 at the END of the command
+
 #define WIN32_MEAN_AND_LEAN
 
 #include <winsock2.h> // MUST BE INCLUDED BEFORE STDIO
@@ -5,11 +7,11 @@
 #include <stdio.h> 
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <time.h>
 
-#define ERRPRINT(MSG, CODE) printf(MSG " Error code: %d\n", CODE); exit(1);
-
-#define WT_DIE(MSG, CODE) printf("%s Error code: %d\n", MSG, CODE); exit(1)
-#define WT_QUIT(MSG, CODE) close_cli(); WT_DIE(MSG, CODE)
+#define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
+#define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_cli(); exit(1)
 
 #define DEBUG 1
 
@@ -30,7 +32,6 @@
 #undef DELETE
 #endif
 #define USR "usr"
-#define PATH_LEN 255
 #define FILE_CNT 3
 
 #define HTTP_BAD_REQ 400
@@ -41,40 +42,53 @@
 #define HTTP_WRONG_VER 505
 #define HTTP_OK 200
 #define HTTP_NOT_MOD 304
+#define HTTP_TIME_LEN 29
 
+enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
+  MTD_COUNT}; // for keeping track of number of methods
+const char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
+  "OPTIONS", "TRACE", "PATCH"};
+const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
+const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
 
-// compile with -lws2_32 at the END of the command
+/**
+ * Struct representing data parsed from request header. Only contains supported
+ * information fields. Supported headers are Accept, Connection,
+ * If-Modified-Since
+ */
+struct reqinfo {
+  enum http_mtd mtd;
+  char url[FIELD_BUFLEN + 1];
+  char accept[FIELD_BUFLEN + 1];
+  bool keep_alive;
+  bool if_mod_since;
+  time_t if_mod_since_time;
+  char *data;
+};
+
+FILE *setup_get_resource(struct reqinfo *info);
+size_t write_get_req(char *req, struct reqinfo *info);
+bool parse_resp(char *resp, char *res_type, bool *is_chunked);
+void close_cli();
+BOOL WINAPI int_handler(DWORD sig_type);
+char *_strcat(char *destination, const char *source);
+char *_strcpy(char *destination, const char *source);
 
 SOCKET sock = INVALID_SOCKET; // for receiving connections
-
-void close_cli() {
-  printf("\nClosing sockets.\n");
-  shutdown(sock, SD_BOTH);
-  closesocket(sock);
-  WSACleanup();
-}
-
-BOOL WINAPI int_handler(DWORD sig_type) {
-  if (sig_type == CTRL_C_EVENT || sig_type == CTRL_BREAK_EVENT) {
-    close_cli();
-  }
-  return FALSE;
-}
 
 int main(int argc, char** argv) {
   WSADATA wsa;
   // start version 2.2 of winsock
   int status = WSAStartup(MAKEWORD(2,2), &wsa); 
   if (status != 0) {
-    ERRPRINT("Failed to start winsock!", status);
+    WT_DIE("Failed to start winsock!", status);
   }
   SetConsoleCtrlHandler(int_handler, TRUE); // install Ctrl-C handler
 
   // Create internet socket using reliable data connection, specifically using
   // TCP
   if ((sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-    status = WSAGetLastError();
-    ERRPRINT("Failed to create socket!", status);
+    WT_DIE("Failed to create socket!", WSAGetLastError());
   }
 
   // Specify the server to connect to
@@ -90,55 +104,221 @@ int main(int argc, char** argv) {
 
   // Connect
   if (connect(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-    status = WSAGetLastError();
-    ERRPRINT("Failed to connect to server!", status);
+    WT_DIE("Failed to connect to server!", WSAGetLastError());
   }
 
-  // Send some text
-  char buf[PATH_LEN] = USR;
-  char *bufptr = buf + strlen(USR);
-  const char *filenames[FILE_CNT] = {"/a.jpg", "/b.mp3", "/c.txt"};
-  const char *mime[FILE_CNT] = {"img/jpeg", "audio/mp3", "text/plain"};
+  // setup common request features
+  struct reqinfo info;
+  char reqbuf[DATA_BUFLEN + 1];
+  size_t reqlen;
+  FILE *recv_file = NULL;
 
-  /* for (int i = 0; i < FILE_CNT; ++i) {
-     strncpy(bufptr, filenames[i], strlen(filenames[i]));
-     if (send(sock, buf, strlen(buf), 0) < 0) {
-     status = WSAGetLastError();
-     ERRPRINT("Failed to send data!", status);
-     }
-     } */
+  info.mtd = GET;
+  info.data = NULL;
+  // TODO allow user input to change these settings
+  info.keep_alive = true;
+  info.if_mod_since = true;
+  time_t if_mod_since_time = 1; // beginning of time
 
+  for (int i = 0; i < FILE_CNT; ++i) {
 
-  char *ok_query = "GET /c.txt HTTP/1.1\r\n"
-    "Host: localhost\r\n"
-    "Accept: text/plain\r\n"
-    "If-Modified-Since: Wed, 01 Jan 2020 16:00:00 GMT\r\n"
-    "Connection: close\r\n"
-    "\r\n";
-  if (send(sock, ok_query, strlen(ok_query), 0) < 0) {
-    status = WSAGetLastError();
-    ERRPRINT("Failed to send data!", status);
-  }
+    // generate file request
+    strcpy(info.url, filenames[i]);
+    strcpy(info.accept, mime[i]);
+    recv_file = setup_get_resource(&info);
+    if (!recv_file) {
+      fprintf(stderr, "Failed to open %s for writing!", info.url);
+      continue;
+    }
+    reqlen = write_get_req(reqbuf, &info);
 
-  int recv_status = SOCKET_ERROR;
-  char recvbuf[DATA_BUFLEN + 1];
+    // request file
+    if (send(sock, reqbuf, reqlen, 0) < 0) {
+      status = WSAGetLastError();
+      WT_INFO("Failed to send request!", WSAGetLastError());
+      continue;
+    }
 
-  while (1) {
-    recv_status = recv(sock, recvbuf, DATA_BUFLEN, 0);
-    if (recv_status == SOCKET_ERROR) {
-      WT_QUIT("Error receiving data!", WSAGetLastError());
-    } else if (recv_status == 0) {
-      printf("Connection closed by server.\n");
-      break;
-    } 
+    // handle response
+    int recv_status = SOCKET_ERROR;
+    char recvbuf[DATA_BUFLEN + 1];
+    bool is_chunked = false;
+    bool is_hdr_read = false;
+    char *recvbufcurr;
+    char *res_name, *res_type;
 
-    printf("Receieved %d bytes\n", recv_status);
-    recvbuf[recv_status] = '\0';
-    printf("Data received: %s\n\n", recvbuf);
+    while (1) {
+      recv_status = recv(sock, recvbuf, DATA_BUFLEN, 0);
+      if (recv_status == SOCKET_ERROR) {
+        WT_DIE("Error receiving data!", WSAGetLastError());
+      } else if (recv_status == 0) {
+        printf("Connection closed by server.\n");
+        break;
+      } 
 
-    // TODO malloc a buffer and resize as data comes in
+      printf("Receieved %d bytes\n", recv_status);
+      recvbuf[recv_status] = '\0';
+
+      if (!is_hdr_read) {
+        is_hdr_read = parse_resp(recvbuf, res_type, &is_chunked);
+        if (!is_hdr_read) { // error while reading
+          break;
+        }
+      } else {
+        // TODO malloc a buffer and resize as data comes in
+
+      }
+    }
   }
 
   close_cli();
   return 0;
 }  
+
+/**
+ * Parse a HTTP 1.1 response. 
+ *
+ * @param[in] req The text of the response to parse.
+ * @param[in] res_type The expected resource type.
+ * @param[out] is_chunked A pointer to a boolean that will be set to true if 
+ * the response is delivering the file in chunks.
+ * @return True if request successfully parsed, false otherwise.
+ */
+bool parse_resp(char *resp, char *res_type, bool *is_chunked) {
+  int respcode;
+  char msgbuf[FIELD_BUFLEN + 1];
+  char verbuf[FIELD_BUFLEN + 1];
+  int linelen;
+
+  char *end = strstr(resp, "\r\n\r\n");
+  if (end == NULL) {
+    fprintf(stderr, "No header terminator!\n");
+    return false;
+  }
+
+  if (sscanf(resp, "%" FIELD_BUFLEN_STR "s %d %" FIELD_BUFLEN_STR "[^\r\n]\r\n%n", 
+        verbuf, &respcode, msgbuf, &linelen) != 3) {
+    fprintf(stderr, "Invalid response format!\n");
+    return false;
+  }
+
+  if (strcmp(verbuf, "HTTP/1.1") != 0) {
+    fprintf(stderr, "Unsupported HTTP version!\n");
+    return false;
+  }
+
+  if (respcode != HTTP_OK) {
+    fprintf(stderr, "File not downloaded: %d %s\n", respcode, msgbuf);
+    return false;
+  }
+
+  printf("Received HTTP response:\n%s\n", resp);
+
+  resp += linelen;
+
+  // start parsing header lines
+  char hdrbuf[FIELD_BUFLEN], valbuf[DATA_BUFLEN];
+  while (resp < end) {
+    if (sscanf(resp, " %" FIELD_BUFLEN_STR "[^ :\r\n]: %" DATA_BUFLEN_STR 
+          "[^\r\n] \r\n%n", hdrbuf, valbuf, &linelen) != 2) {
+      fprintf(stderr, "Invalid header line: %s\n", resp);
+      return false;
+    }
+    resp += linelen;
+    debug_print("Processing %s...\n", hdrbuf);
+
+    // lowercase field names for comparison
+    char *p;
+    for (p = hdrbuf; *p != 0; ++p) {
+      *p = tolower(*p);
+    }
+
+    // check various supported headers
+    if (strcmp(hdrbuf, "content-type") == 0) {
+      if (strcmp(valbuf, res_type) != 0) {
+        fprintf(stderr, "Incorrect content type, expected %s, got %s", res_type, valbuf);
+        return false;
+      }
+    } else if (strcmp(hdrbuf, "transfer-encoding") == 0) {
+      if (strcmp(valbuf, "chunked") != 0) {
+        *is_chunked = true;
+      }
+    }
+  }
+  debug_print("Header is valid.\n");
+  return true;
+}
+
+FILE *setup_get_resource(struct reqinfo *info) {
+  static char buf[FIELD_BUFLEN] = USR;
+  static char *bufptr = buf + strlen(USR);
+  strcpy(bufptr, info->url);
+  return fopen(buf, "wb");
+}
+
+size_t write_get_req(char *req, struct reqinfo *info) {
+  char *reqcurr;
+  char *conntype;
+  if (info->keep_alive) {
+    conntype = "keep-alive";
+  } else {
+    conntype = "close";
+  }
+
+  char timestamp[HTTP_TIME_LEN + 1];
+  struct tm tm = *gmtime(&info->if_mod_since_time);
+  strftime(timestamp, HTTP_TIME_LEN + 1, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+
+  int reqlen;
+  sprintf(req, "GET %s HTTP/1.1\r\n"
+      "Host: localhost\r\n"
+      "Accept: %s\r\n"
+      "Connection: %s\r\n%n", info->url, info->accept, conntype, &reqlen);
+  reqcurr = req + reqlen;
+
+  if (info->if_mod_since) {
+    append(reqcurr, "If-Modified-Since: ");
+    append(reqcurr, timestamp);
+    append(reqcurr, "\r\n");
+  }
+
+  append(reqcurr, "\r\n");
+  return reqcurr - req;
+}
+
+void close_cli() {
+  printf("\nClosing sockets.\n");
+  shutdown(sock, SD_BOTH);
+  closesocket(sock);
+  WSACleanup();
+}
+
+BOOL WINAPI int_handler(DWORD sig_type) {
+  if (sig_type == CTRL_C_EVENT || sig_type == CTRL_BREAK_EVENT) {
+    close_cli();
+  }
+  return FALSE;
+}
+
+/**
+ * strcpy that returns pointer to null byte of concatenated strings.
+ */
+char *_strcpy(char *destination, const char *source) {
+  char s = *source;
+  while (s != 0) {
+    *(destination++) = s;
+    s = *(++source);
+  }
+  *destination = '\0';
+  return destination;
+}
+
+/**
+ * strcat that returns pointer to null byte of concatenated strings.
+ */
+char *_strcat(char *destination, const char *source) {
+  while (*destination != 0) {
+    ++destination;
+  }
+  return _strcpy(destination, source);
+}
