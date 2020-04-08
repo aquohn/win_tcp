@@ -24,7 +24,7 @@
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
 #define WT_DISCONN(SOCK) shutdown(SOCK, SD_BOTH); closesocket(SOCK); break 
-#define WT_SENDERR(ERR, SOCK) if (send_err_resp(ERR)) { continue; } else { WT_DISCONN(SOCK); }
+#define WT_SENDERR(ERR, SOCK) if (send_err_resp(ERR, SOCK)) { continue; } else { WT_DISCONN(SOCK); }
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
 #define append(str1, str2) str1 = _strcpy(str1, str2)
@@ -79,9 +79,10 @@ struct reqinfo {
 };
 
 bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
-    char *resp);
-bool send_err_resp(int errcode);
-int send_chunk(char *sendptr, char *chunkptr, size_t chunklen);
+    char *resp, SOCKET conn_sock);
+void *handle_conn(void *p_sock);
+bool send_err_resp(int errcode, SOCKET conn_sock);
+int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, SOCKET conn_sock);
 FILE *locate(char *url, char *accept, int *errcode, const char **type);
 char *write_date_hdr(char *buf);
 void write_ok_resp(char *resp, struct reqinfo *info, struct stat *file_status,
@@ -94,7 +95,6 @@ BOOL WINAPI int_handler(DWORD sig_type);
 void close_serv();
 
 SOCKET listen_sock = INVALID_SOCKET; // for receiving connections
-SOCKET conn_sock = INVALID_SOCKET; // for maintaining a connection
 FILE *serv_file = NULL;
 
 int main(int argc, char** argv) {
@@ -135,103 +135,109 @@ int main(int argc, char** argv) {
 
   // Handle connections
   while (1) {
+
     struct sockaddr_in cli_addr;
-    conn_sock = accept(listen_sock, (struct sockaddr *) &cli_addr, 
+    SOCKET conn_sock = accept(listen_sock, (struct sockaddr *) &cli_addr, 
         &sin_size);
     char cli_addr_str[ADDR_BUFLEN];
     inet_ntop(AF_INET, &cli_addr.sin_addr, cli_addr_str, ADDR_BUFLEN);
     printf("Connection from %s\n", cli_addr_str);
+    
+    _beginthread(handle_conn, 0, conn_sock);
+  } 
+  return 0;
+}  
 
-    // Read in data
-    int recv_status = SOCKET_ERROR;
-    char recvbuf[DATA_BUFLEN + 1];
-    char sendbuf[DATA_BUFLEN + 1];
+void *handle_conn(void *p_sock) {
+  SOCKET conn_sock = (SOCKET) p_sock;
+  // Read in data
+  int recv_status = SOCKET_ERROR;
+  char recvbuf[DATA_BUFLEN + 1];
+  char sendbuf[DATA_BUFLEN + 1];
 
-    // Receive from socket
-    while (1) {
-      recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
-      if (recv_status == SOCKET_ERROR) {
-        WT_INFO("Error receiving data!", WSAGetLastError());
-        // TODO: differentiate between different errors
-        break;
-      } else if (recv_status == 0) {
-        printf("Connection closed by client.\n");
-        break;
-      } 
+  // Receive from socket
+  while (1) {
+    recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
+    if (recv_status == SOCKET_ERROR) {
+      WT_INFO("Error receiving data!", WSAGetLastError());
+      // TODO: differentiate between different errors
+      break;
+    } else if (recv_status == 0) {
+      printf("Connection closed by client.\n");
+      break;
+    } 
 
-      printf("Read %d bytes.\n", recv_status);
-      recvbuf[recv_status] = '\0';
+    printf("Read %d bytes.\n", recv_status);
+    recvbuf[recv_status] = '\0';
 
-      debug_print("Data received: %s\n", recvbuf);
+    debug_print("Data received: %s\n", recvbuf);
 
-      struct reqinfo info;
-      int errcode = 0;
-      const char *type;
+    struct reqinfo info;
+    int errcode = 0;
+    const char *type;
 
-      // parse request header
-      if (!parse_req(recvbuf, &info, &errcode)) {
+    // parse request header
+    if (!parse_req(recvbuf, &info, &errcode)) {
+      WT_SENDERR(errcode, conn_sock);
+    }
+
+    printf("Received HTTP request:\n%s\n", recvbuf);
+
+    serv_file = locate(info.url, info.accept, &errcode, &type);
+    struct stat file_status;
+    fstat(fileno(serv_file), &file_status);
+
+    if (serv_file == NULL) {
+      if (!info.keep_alive) {
+        send_err_resp(errcode, conn_sock);
+        WT_DISCONN(conn_sock);
+      } else {
         WT_SENDERR(errcode, conn_sock);
       }
+    }
 
-      printf("Received HTTP request:\n%s\n", recvbuf);
-
-      serv_file = locate(info.url, info.accept, &errcode, &type);
-      struct stat file_status;
-      fstat(fileno(serv_file), &file_status);
-
-      if (serv_file == NULL) {
+    // check last modified
+    if (info.if_mod_since) {
+      if (file_status.st_mtime <= info.if_mod_since_time) {
+        fclose(serv_file);
+        errcode = HTTP_NOT_MOD;
         if (!info.keep_alive) {
-          send_err_resp(errcode);
+          send_err_resp(errcode, conn_sock);
           WT_DISCONN(conn_sock);
         } else {
           WT_SENDERR(errcode, conn_sock);
         }
       }
+    }
 
-      // check last modified
-      if (info.if_mod_since) {
-        if (file_status.st_mtime <= info.if_mod_since_time) {
-          fclose(serv_file);
-          errcode = HTTP_NOT_MOD;
-          if (!info.keep_alive) {
-            send_err_resp(errcode);
-            WT_DISCONN(conn_sock);
-          } else {
-            WT_SENDERR(errcode, conn_sock);
-          }
-        }
-      }
+    debug_print("Resource retrieved.\n");
 
-      debug_print("Resource retrieved.\n");
+    char resp[DATA_BUFLEN]; 
+    write_ok_resp(resp, &info, &file_status, type);
 
-      char resp[DATA_BUFLEN]; 
-      write_ok_resp(resp, &info, &file_status, type);
-
-      // only implementing GET for this assignment, and all transfers are
-      // automatically chunked
-      // format is <chunk size in hex>\r\n<chunk>\r\n
-      if (info.mtd == GET) {
-        if (!handle_get(sendbuf, &info, &file_status, resp)) {
-          fclose(serv_file);
-          WT_INFO("Failed to send while handling GET!", WSAGetLastError());
-          WT_DISCONN(conn_sock);
-        }
-      } else {
+    // only implementing GET for this assignment, and all transfers are
+    // automatically chunked
+    // format is <chunk size in hex>\r\n<chunk>\r\n
+    if (info.mtd == GET) {
+      if (!handle_get(sendbuf, &info, &file_status, resp, conn_sock)) {
         fclose(serv_file);
-        errcode = HTTP_WRONG_MTD;
-        WT_SENDERR(errcode, conn_sock);
-      }
-
-      fclose(serv_file);
-
-      if (!info.keep_alive) {
-        printf("Connection completed and closed.\n\n");
+        WT_INFO("Failed to send while handling GET!", WSAGetLastError());
         WT_DISCONN(conn_sock);
       }
-    } 
+    } else {
+      fclose(serv_file);
+      errcode = HTTP_WRONG_MTD;
+      WT_SENDERR(errcode, conn_sock);
+    }
+
+    fclose(serv_file);
+
+    if (!info.keep_alive) {
+      printf("Connection completed and closed.\n\n");
+      WT_DISCONN(conn_sock);
+    }
   }
-  return 0;
-}  
+}
 
 /**
  * Parse a HTTP 1.1 request. 
@@ -352,7 +358,7 @@ bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
  * @return True if resource was transmitted with no errors, false otherwise.
  */
 bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
-    char *resp) {
+    char *resp, SOCKET conn_sock) {
   size_t full_chunk_size = DATA_BUFLEN - HEXSTR_MAXLEN - 4;
   size_t full_chunks = file_status->st_size / full_chunk_size;
   size_t last_chunk_size = file_status->st_size % full_chunk_size;
@@ -380,7 +386,7 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
     size_t c;
     for (c = 0; c < full_chunks; ++c) {
 
-      if (send_chunk(sendbuf, sendbufcurr, full_chunk_size) < 0) {
+      if (send_chunk(sendbuf, sendbufcurr, full_chunk_size, conn_sock) < 0) {
         return false;
       }
       //debug_print("Sent %d-byte full chunk: %s\n", send_status, sendbuf);
@@ -390,7 +396,7 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
   // write last chunk
   sprintf(chunklen_hexstr, "%" LL_FMT "X\r\n", last_chunk_size);
   sendbufcurr = _strcpy(sendbuf, chunklen_hexstr);
-  if (send_chunk(sendbuf, sendbufcurr, last_chunk_size) < 0) {
+  if (send_chunk(sendbuf, sendbufcurr, last_chunk_size, conn_sock) < 0) {
     return false;
   }
   //debug_print("Sent %d-byte last chunk: %s\n", send_status, sendbuf);
@@ -409,7 +415,7 @@ bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status,
 /**
  * Sends a chunk of data.
  */
-int send_chunk(char *sendptr, char *chunkptr, size_t chunklen) {
+int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, SOCKET conn_sock) {
   char *endptr = chunkptr + fread(chunkptr, 1, chunklen, serv_file);
   append(endptr, "\r\n");
   return send(conn_sock, sendptr, endptr - sendptr, 0);
@@ -510,7 +516,7 @@ BOOL WINAPI int_handler(DWORD sig_type) {
  * Send an error response to the client. Returns true if response was
  * successfully sent, false otherwise.
  */
-bool send_err_resp(int errcode) {
+bool send_err_resp(int errcode, SOCKET conn_sock) {
   char closebuf[DATA_BUFLEN] = "HTTP/1.1 ";
   char *bufptr = closebuf;
   char *errstr;
@@ -558,9 +564,9 @@ void close_serv() {
   }
   printf("\nClosing sockets.\n");
   shutdown(listen_sock, SD_BOTH);
-  shutdown(conn_sock, SD_BOTH);
+  // shutdown(conn_sock, SD_BOTH);
   closesocket(listen_sock);
-  closesocket(conn_sock);
+  // closesocket(conn_sock);
   WSACleanup();
 }
 
