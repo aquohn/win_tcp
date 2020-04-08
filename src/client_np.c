@@ -146,6 +146,8 @@ int main(int argc, char** argv) {
     bool is_hdr_read = false;
     char *recvbufcurr;
     char *res_name, *res_type;
+    char *filebuf = NULL, *filebufcurr = NULL;
+    size_t filebuflen, filebufcurrlen = 0;
 
     while (1) {
       recv_status = recv(sock, recvbuf, DATA_BUFLEN, 0);
@@ -165,8 +167,24 @@ int main(int argc, char** argv) {
           break;
         }
       } else {
-        // TODO malloc a buffer and resize as data comes in
-
+        if (is_chunked) {
+          if (!filebuf) {
+            filebuf = malloc(2 * DATA_BUFLEN);
+            if (!filebuf) {
+              fprintf(stderr, "Unable to allocate memory for data!");
+            }
+            filebufcurr = filebuf;
+            filebuflen = 2 * DATA_BUFLEN;
+          }
+          filebufcurrlen += recv_status;
+          if (filebufcurrlen >= filebuflen) {
+            filebuflen = filebufcurrlen * 2;
+            filebuf = realloc(filebuf, filebuflen);
+            filebufcurr = filebuf + filebufcurrlen - recv_status;
+          }
+          memcpy(filebufcurr, recvbuf, recv_status);
+          filebufcurr += recv_status;
+        }
       }
     }
   }
