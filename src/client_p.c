@@ -53,6 +53,10 @@
 #define HTTP_NOT_MOD 304
 #define HTTP_TIME_LEN 29
 
+#pragma comment (lib, "Ws2_32.lib")
+#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "AdvApi32.lib")
+
 enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
   MTD_COUNT}; // for keeping track of number of methods
 const char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",

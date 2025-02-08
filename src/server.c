@@ -23,7 +23,7 @@
 
 #define WT_INFO(MSG, CODE) fprintf(stderr, "%s Error code: %d\n", MSG, CODE)
 #define WT_DIE(MSG, CODE) WT_INFO(MSG, CODE); close_serv(); exit(1)
-#define WT_DISCONN(SOCK) shutdown(SOCK, SD_BOTH); closesocket(SOCK); break 
+#define WT_DISCONN(SOCK) shutdown(SOCK, SD_BOTH); closesocket(SOCK); printf("Disconnecting from client.\n"); break 
 #define WT_SENDERR(ERR, SOCK) if (send_err_resp(ERR, SOCK)) { continue; } else { WT_DISCONN(SOCK); }
 
 #define debug_print(...) do { if (DEBUG) fprintf(stderr, __VA_ARGS__); } while (0)
@@ -56,6 +56,10 @@
 #define HTTP_NOT_MOD 304
 #define HTTP_TIME_LEN 29
 
+#pragma comment (lib, "Ws2_32.lib")
+#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "AdvApi32.lib")
+
 enum http_mtd {GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
   MTD_COUNT}; // for keeping track of number of methods
 const char *http_mtd_strs[] = {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT",
@@ -80,7 +84,7 @@ struct reqinfo {
 
 bool handle_get(char *sendbuf, struct reqinfo *info, struct stat *file_status, 
     char *resp, SOCKET conn_sock);
-void *handle_conn(void *p_sock);
+void handle_conn(void *p_sock);
 bool send_err_resp(int errcode, SOCKET conn_sock);
 int send_chunk(char *sendptr, char *chunkptr, size_t chunklen, SOCKET conn_sock);
 FILE *locate(char *url, char *accept, int *errcode, const char **type);
@@ -135,20 +139,20 @@ int main(int argc, char** argv) {
 
   // Handle connections
   while (1) {
-
     struct sockaddr_in cli_addr;
     SOCKET conn_sock = accept(listen_sock, (struct sockaddr *) &cli_addr, 
         &sin_size);
     char cli_addr_str[ADDR_BUFLEN];
     inet_ntop(AF_INET, &cli_addr.sin_addr, cli_addr_str, ADDR_BUFLEN);
-    printf("Connection from %s\n", cli_addr_str);
+    printf("\nConnection from %s\n", cli_addr_str);
+    fflush(stdout);
     
     _beginthread(handle_conn, 0, conn_sock);
   } 
   return 0;
 }  
 
-void *handle_conn(void *p_sock) {
+void handle_conn(void *p_sock) {
   SOCKET conn_sock = (SOCKET) p_sock;
   // Read in data
   int recv_status = SOCKET_ERROR;
@@ -159,12 +163,13 @@ void *handle_conn(void *p_sock) {
   while (1) {
     recv_status = recv(conn_sock, recvbuf, DATA_BUFLEN, 0);
     if (recv_status == SOCKET_ERROR) {
-      WT_INFO("Error receiving data!", WSAGetLastError());
       // TODO: differentiate between different errors
-      break;
+      WT_INFO("Error receiving data!", WSAGetLastError());
+      WT_DISCONN(conn_sock);
     } else if (recv_status == 0) {
+
       printf("Connection closed by client.\n");
-      break;
+      WT_DISCONN(conn_sock);
     } 
 
     printf("Read %d bytes.\n", recv_status);
@@ -233,7 +238,7 @@ void *handle_conn(void *p_sock) {
     fclose(serv_file);
 
     if (!info.keep_alive) {
-      printf("Connection completed and closed.\n\n");
+      printf("Connection completed and closed.\n");
       WT_DISCONN(conn_sock);
     }
   }
@@ -250,7 +255,6 @@ void *handle_conn(void *p_sock) {
  * @return True if request successfully parsed, false otherwise.
  */
 bool parse_req(const char *req, struct reqinfo *info, int *errcode) {
-
   char mtdbuf[FIELD_BUFLEN + 1], verbuf[FIELD_BUFLEN + 1]; 
   int linelen; 
 
@@ -453,13 +457,16 @@ FILE *locate(char *url, char *accept, int *errcode, const char **type) {
   int i;
   for (i = 0; i < FILE_CNT; ++i) {
     if (strcmp(url, filenames[i]) == 0) {
-      if ((accept[0] != 0) && (strcmp(accept, mime[i]) != 0)) {
-        *errcode = HTTP_NOT_ACC;
-        return NULL;
-      } else {
+      if (accept[0] != 0) {
+        if ((strstr(accept, mime[i]) == NULL) 
+            && (strstr(accept, "*/*") == NULL)) {
+          *errcode = HTTP_NOT_ACC;
+          return NULL;
+        } 
         *type = mime[i];
         strcpy(path + SRV_LEN, filenames[i]);
         return fopen(path, "rb");
+
       }
     }
   }
@@ -551,7 +558,7 @@ bool send_err_resp(int errcode, SOCKET conn_sock) {
     WT_INFO("Failed to send error response!", WSAGetLastError());
     return false;
   }
-  debug_print("Sending %s error to client...\n", errstr);
+  printf("Sent %s response to client.\n", errstr);
   return true;
 }
 
